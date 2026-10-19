@@ -68,17 +68,60 @@ function loadIdentity() {
   return identity;
 }
 
+let registryTokenSource = '';
+
+function registryTokenCandidates() {
+  const candidates = [
+    process.env.REGISTRY_TOKEN_FILE,
+    TOKEN_FILE,
+    '/home/container/registry_token.txt',
+    path.join(process.cwd(), 'registry_token.txt')
+  ].filter(Boolean).map(p => path.resolve(String(p)));
+  return [...new Set(candidates)];
+}
+
 function readRegistryToken() {
-  const envToken = String(process.env.HOSTSHIP_REGISTER_TOKEN || process.env.REGISTRY_TOKEN || '').trim();
-  if (envToken) return envToken;
-  try {
-    const fileToken = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
-    if (fileToken) {
-      try { fs.chmodSync(TOKEN_FILE, 0o600); } catch {}
-      return fileToken;
-    }
-  } catch {}
+  const hostshipEnv = String(process.env.HOSTSHIP_REGISTER_TOKEN || '').trim();
+  if (hostshipEnv) {
+    registryTokenSource = 'env:HOSTSHIP_REGISTER_TOKEN';
+    return hostshipEnv;
+  }
+
+  const registryEnv = String(process.env.REGISTRY_TOKEN || '').trim();
+  if (registryEnv) {
+    registryTokenSource = 'env:REGISTRY_TOKEN';
+    return registryEnv;
+  }
+
+  for (const candidate of registryTokenCandidates()) {
+    try {
+      const fileToken = fs.readFileSync(candidate, 'utf8').replace(/^\\uFEFF/, '').trim();
+      if (fileToken) {
+        registryTokenSource = 'file:' + candidate;
+        try { fs.chmodSync(candidate, 0o600); } catch {}
+        return fileToken;
+      }
+    } catch {}
+  }
+
+  registryTokenSource = '';
   return '';
+}
+
+function logRegistryTokenDiagnostics() {
+  const states = registryTokenCandidates().map(candidate => {
+    try {
+      const st = fs.statSync(candidate);
+      return candidate + ':exists,size=' + st.size + ',file=' + (st.isFile() ? 'yes' : 'no');
+    } catch (e) {
+      return candidate + ':missing(' + String(e.code || 'error') + ')';
+    }
+  });
+  console.log(
+    'REGISTRY_TOKEN_DIAG cwd=' + process.cwd() +
+    ' home=' + String(process.env.HOME || '') +
+    ' candidates=[' + states.join(';') + ']'
+  );
 }
 
 const identity = loadIdentity();
@@ -238,8 +281,10 @@ async function registerNode() {
   registryToken = readRegistryToken();
   if (!registryToken) {
     console.log('REGISTRY_DISABLED reason=token_missing');
+    logRegistryTokenDiagnostics();
     return false;
   }
+  console.log('REGISTRY_TOKEN_READY source=' + registryTokenSource);
   try {
     await postJson(registryBase + registerPath, registryPayload());
     console.log('REGISTRY_READY node_id=' + identity.nodeId + ' provider=host-ship');
