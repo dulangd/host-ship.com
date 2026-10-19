@@ -12,6 +12,7 @@ const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(HOME, '.hostsh
 const IDENTITY_FILE = path.join(STATE_DIR, 'identity.json');
 const OUTPUT_FILE = path.resolve(process.env.OUTPUT_FILE || path.join(HOME, 'deployment-output.txt'));
 const TOKEN_FILE = path.resolve(process.env.REGISTRY_TOKEN_FILE || path.join(HOME, 'registry_token.txt'));
+const REGISTRY_PROOF_FILE = path.join(STATE_DIR, 'registry-proof.txt');
 
 function validPort(value, fallback) {
   const n = Number(value);
@@ -44,6 +45,20 @@ function normalizePath(value) {
   const v = String(value || '').trim();
   if (!v) throw new Error('path cannot be empty');
   return v.startsWith('/') ? v : '/' + v;
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+function loadRegistryProof() {
+  try {
+    const saved = fs.readFileSync(REGISTRY_PROOF_FILE, 'utf8').trim();
+    if (saved.length >= 32) return saved;
+  } catch {}
+  const proof = randomToken(32);
+  writePrivate(REGISTRY_PROOF_FILE, proof + '\n');
+  return proof;
 }
 
 function loadIdentity() {
@@ -125,6 +140,8 @@ function logRegistryTokenDiagnostics() {
 }
 
 const identity = loadIdentity();
+const registryProof = loadRegistryProof();
+const registryProofSha256 = sha256Hex(registryProof);
 const listenHost = process.env.LISTEN_HOST || '0.0.0.0';
 const listenPort = validPort(process.env.SERVER_PORT, validPort(process.env.PORT, 30376));
 const publicHost = String(process.env.PUBLIC_HOST || '45.131.65.244').trim();
@@ -231,24 +248,26 @@ async function detectGeo() {
   }
 }
 
-async function postJson(url, body) {
-  if (!registryToken) throw new Error('registry token unavailable');
+async function postJson(url, body, token = '') {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 12000);
   try {
+    const headers = {
+      'content-type': 'application/json',
+      'user-agent': 'container-test-hostship/1.1'
+    };
+    if (token) {
+      headers.authorization = 'Bearer ' + token;
+      headers['x-registry-token'] = token;
+    }
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'authorization': 'Bearer ' + registryToken,
-        'x-registry-token': registryToken,
-        'user-agent': 'container-test-hostship/1.0'
-      },
+      headers,
       body: JSON.stringify(body),
       signal: ctl.signal
     });
     const text = await res.text();
-    if (!res.ok) throw new Error('HTTP ' + res.status + (text ? ' ' + text.slice(0, 160) : ''));
+    if (!res.ok) throw new Error('HTTP ' + res.status + (text ? ' ' + text.slice(0, 200) : ''));
     return text;
   } finally {
     clearTimeout(timer);
@@ -277,32 +296,43 @@ function registryPayload() {
   };
 }
 
+function publicRegistryPayload() {
+  return {
+    ...registryPayload(),
+    endpoint: publicBase(),
+    proof: registryProof
+  };
+}
+
 async function registerNode() {
   registryToken = readRegistryToken();
-  if (!registryToken) {
-    console.log('REGISTRY_DISABLED reason=token_missing');
-    logRegistryTokenDiagnostics();
-    return false;
-  }
-  console.log('REGISTRY_TOKEN_READY source=' + registryTokenSource);
+  const mode = registryToken ? 'bearer-token' : 'public-proof';
   try {
-    await postJson(registryBase + registerPath, registryPayload());
-    console.log('REGISTRY_READY node_id=' + identity.nodeId + ' provider=host-ship');
+    if (registryToken) {
+      console.log('REGISTRY_TOKEN_READY source=' + registryTokenSource);
+      await postJson(registryBase + registerPath, registryPayload(), registryToken);
+    } else {
+      await postJson(registryBase + '/api/v1/register-public', publicRegistryPayload());
+    }
+    console.log('REGISTRY_READY node_id=' + identity.nodeId + ' provider=host-ship mode=' + mode);
     return true;
   } catch (e) {
-    console.log('REGISTRY_REGISTER_FAILED reason=' + String(e.message || e));
+    console.log('REGISTRY_REGISTER_FAILED mode=' + mode + ' reason=' + String(e.message || e));
     return false;
   }
 }
 
 async function heartbeat() {
   registryToken = readRegistryToken();
-  if (!registryToken) return;
+  if (!registryToken) {
+    await registerNode();
+    return;
+  }
   try {
     await postJson(registryBase + heartbeatPath, {
       node_id: identity.nodeId,
       status: 'online'
-    });
+    }, registryToken);
     console.log('REGISTRY_HEARTBEAT_OK node_id=' + identity.nodeId);
   } catch (e) {
     console.log('REGISTRY_HEARTBEAT_RECOVER reason=' + String(e.message || e));
@@ -537,16 +567,21 @@ function requestHandler(req, res) {
     return res.end(JSON.stringify({
       ok: true,
       service: 'hostship-native-node',
+      provider: 'host-ship',
       runtime: process.version,
       listen_port: listenPort,
       public_host: publicHost,
       public_port: publicPort,
+      endpoint: publicBase(),
       transport: 'ws',
       tls: publicTls,
       node_id: identity.nodeId,
       country: countryCode || null,
       egress_ip: egressIp || null,
-      registry_configured: !!readRegistryToken()
+      geo: { country: countryCode || null, egress_ip: egressIp || null, verified: !!countryCode && !!egressIp },
+      registry_proof_sha256: registryProofSha256,
+      registry_configured: true,
+      registry_auth_mode: readRegistryToken() ? 'bearer-token' : 'public-proof'
     }));
   }
 
