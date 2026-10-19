@@ -8,10 +8,12 @@ Container Test runtime for the first Host-Ship.com server.
 - Allocation shown by Host-Ship: `45.131.65.244:30376`
 - Repository: `https://github.com/dulangd/host-ship.com.git`
 - Branch: `main`
-- Main file: `index.js`
+- Main file: `index.ts`
 - No npm packages are required.
 
 The server binds `0.0.0.0` and prefers `SERVER_PORT`, then `PORT`, then the current allocation `30376`.
+
+Host-Ship's current NodeJS egg compares `MAIN_FILE` against the literal string `*.js`, so ordinary names such as `index.js` fall through to `ts-node --esm`. For this provider, `index.ts` is therefore the intended panel entry point; it launches the actual `index.js` runtime with Node.
 
 ## Test endpoints
 
@@ -24,6 +26,8 @@ The server binds `0.0.0.0` and prefers `SERVER_PORT`, then `PORT`, then the curr
 Identity is stored in `/home/container/.hostship-node/identity.json` so normal restarts preserve UUID, WebSocket path, subscription token and node ID.
 
 ## First validation
+
+After setting the Git repository on an already-created server, reinstall the server once so the egg's install stage actually clones the repository. A normal Start only runs `git pull` when `/home/container/.git` already exists.
 
 Start with the native Host-Ship allocation only. The runtime prints:
 
