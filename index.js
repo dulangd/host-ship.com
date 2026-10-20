@@ -154,11 +154,32 @@ const registryBase = String(process.env.REGISTRY_URL || 'https://subscription-se
 const registerPath = normalizePath(process.env.REGISTRY_REGISTER_PATH || '/api/v1/register');
 const heartbeatPath = normalizePath(process.env.REGISTRY_HEARTBEAT_PATH || '/api/v1/heartbeat');
 const heartbeatMinutes = Math.max(1, Number(process.env.REGISTRY_HEARTBEAT_MINUTES || 10) || 10);
+const verboseTrafficLogs = envBool('VERBOSE_TRAFFIC_LOGS', false);
 let registryToken = readRegistryToken();
+let registryLeaseSeconds = 900;
+let registryRegistered = false;
+let registryRefreshTimer = null;
+let registryRefreshRunning = false;
 
 let countryCode = '';
 let egressIp = '';
 let nodeName = String(process.env.NODE_NAME || 'HostShip-01-Native').trim();
+let firstProxySuccessLogged = false;
+let activeConnections = 0;
+let totalConnections = 0;
+const rateLimitState = new Map();
+
+function trafficLog(message) {
+  if (verboseTrafficLogs) console.log(message);
+}
+
+function rateLimitedLog(key, message, intervalMs = 30000) {
+  const now = Date.now();
+  const previous = rateLimitState.get(key) || 0;
+  if (now - previous < intervalMs) return;
+  rateLimitState.set(key, now);
+  console.log(message);
+}
 
 const subPath = '/' + identity.subToken + '/sub';
 const sub64Path = '/' + identity.subToken + '/sub64';
@@ -304,19 +325,30 @@ function publicRegistryPayload() {
   };
 }
 
-async function registerNode() {
+async function registerNode({ quiet = false } = {}) {
   registryToken = readRegistryToken();
   const mode = registryToken ? 'bearer-token' : 'public-proof';
   try {
+    let responseText = '';
     if (registryToken) {
-      console.log('REGISTRY_TOKEN_READY source=' + registryTokenSource);
-      await postJson(registryBase + registerPath, registryPayload(), registryToken);
+      if (!quiet) console.log('REGISTRY_TOKEN_READY source=' + registryTokenSource);
+      responseText = await postJson(registryBase + registerPath, registryPayload(), registryToken);
     } else {
-      await postJson(registryBase + '/api/v1/register-public', publicRegistryPayload());
+      responseText = await postJson(registryBase + '/api/v1/register-public', publicRegistryPayload());
+      try {
+        const response = JSON.parse(responseText || '{}');
+        const lease = Number(response.lease_seconds);
+        if (Number.isFinite(lease) && lease >= 120) registryLeaseSeconds = lease;
+      } catch {}
     }
-    console.log('REGISTRY_READY node_id=' + identity.nodeId + ' provider=host-ship mode=' + mode);
+    const firstReady = !registryRegistered;
+    registryRegistered = true;
+    if (!quiet || firstReady) {
+      console.log('REGISTRY_READY node_id=' + identity.nodeId + ' provider=host-ship mode=' + mode);
+    }
     return true;
   } catch (e) {
+    registryRegistered = false;
     console.log('REGISTRY_REGISTER_FAILED mode=' + mode + ' reason=' + String(e.message || e));
     return false;
   }
@@ -325,7 +357,7 @@ async function registerNode() {
 async function heartbeat() {
   registryToken = readRegistryToken();
   if (!registryToken) {
-    await registerNode();
+    await registerNode({ quiet: true });
     return;
   }
   try {
@@ -333,11 +365,35 @@ async function heartbeat() {
       node_id: identity.nodeId,
       status: 'online'
     }, registryToken);
-    console.log('REGISTRY_HEARTBEAT_OK node_id=' + identity.nodeId);
   } catch (e) {
     console.log('REGISTRY_HEARTBEAT_RECOVER reason=' + String(e.message || e));
-    await registerNode();
+    await registerNode({ quiet: true });
   }
+}
+
+function registryRefreshDelayMs() {
+  if (registryToken) return heartbeatMinutes * 60000;
+  const safeSeconds = Math.max(60, Math.floor(registryLeaseSeconds * 2 / 3));
+  return safeSeconds * 1000;
+}
+
+function scheduleRegistryRefresh() {
+  if (registryRefreshTimer) clearTimeout(registryRefreshTimer);
+  registryRefreshTimer = setTimeout(async () => {
+    if (registryRefreshRunning) {
+      scheduleRegistryRefresh();
+      return;
+    }
+    registryRefreshRunning = true;
+    try {
+      if (!countryCode) await detectGeo();
+      await heartbeat();
+    } finally {
+      registryRefreshRunning = false;
+      scheduleRegistryRefresh();
+    }
+  }, registryRefreshDelayMs());
+  registryRefreshTimer.unref();
 }
 
 function isPrivateIp(host) {
@@ -430,6 +486,8 @@ class WsPeer {
     this.closed = false;
     this.fragmentOpcode = null;
     this.fragments = [];
+    this.fragmentBytes = 0;
+    this.maxBufferedBytes = 2 * 1024 * 1024;
 
     socket.on('data', chunk => this.feed(chunk));
     socket.on('error', () => this.close());
@@ -443,6 +501,7 @@ class WsPeer {
 
   feed(chunk) {
     if (this.closed) return;
+    if (this.buffer.length + chunk.length > this.maxBufferedBytes) return this.close(1009);
     this.buffer = Buffer.concat([this.buffer, chunk]);
 
     while (true) {
@@ -494,15 +553,19 @@ class WsPeer {
         else {
           this.fragmentOpcode = 2;
           this.fragments = [payload];
+          this.fragmentBytes = payload.length;
         }
         continue;
       }
 
       if (opcode === 0 && this.fragmentOpcode === 2) {
+        this.fragmentBytes += payload.length;
+        if (this.fragmentBytes > this.maxBufferedBytes) return this.close(1009);
         this.fragments.push(payload);
         if (fin) {
-          const msg = Buffer.concat(this.fragments);
+          const msg = Buffer.concat(this.fragments, this.fragmentBytes);
           this.fragments = [];
+          this.fragmentBytes = 0;
           this.fragmentOpcode = null;
           this.onBinary(msg);
         }
@@ -514,11 +577,12 @@ class WsPeer {
   }
 
   send(opcode, payload) {
-    if (!this.closed && !this.socket.destroyed) this.socket.write(wsFrame(opcode, payload));
+    if (this.closed || this.socket.destroyed) return false;
+    return this.socket.write(wsFrame(opcode, payload));
   }
 
   binary(payload) {
-    this.send(2, payload);
+    return this.send(2, payload);
   }
 
   close(code = 1000) {
@@ -581,7 +645,9 @@ function requestHandler(req, res) {
       geo: { country: countryCode || null, egress_ip: egressIp || null, verified: !!countryCode && !!egressIp },
       registry_proof_sha256: registryProofSha256,
       registry_configured: true,
-      registry_auth_mode: readRegistryToken() ? 'bearer-token' : 'public-proof'
+      registry_auth_mode: readRegistryToken() ? 'bearer-token' : 'public-proof',
+      connections: { active: activeConnections, total: totalConnections },
+      verbose_traffic_logs: verboseTrafficLogs
     }));
   }
 
@@ -616,7 +682,7 @@ server.on('upgrade', (req, socket, head) => {
   try { pathname = new URL(req.url, 'http://localhost').pathname; } catch {}
 
   const key = req.headers['sec-websocket-key'];
-  console.log('WS_UPGRADE_SEEN host=' + String(req.headers.host || '') + ' path_match=' + (pathname === identity.wsPath ? 'yes' : 'no'));
+  trafficLog('WS_UPGRADE_SEEN host=' + String(req.headers.host || '') + ' path_match=' + (pathname === identity.wsPath ? 'yes' : 'no'));
   if (
     pathname !== identity.wsPath ||
     !key ||
@@ -631,7 +697,10 @@ server.on('upgrade', (req, socket, head) => {
     .update(String(key) + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
     .digest('base64');
 
-  console.log('WS_UPGRADE_ACCEPTED');
+  trafficLog('WS_UPGRADE_ACCEPTED');
+  activeConnections++;
+  totalConnections++;
+  let connectionClosed = false;
   socket.write(
     'HTTP/1.1 101 Switching Protocols\r\n' +
     'Upgrade: websocket\r\n' +
@@ -644,7 +713,10 @@ server.on('upgrade', (req, socket, head) => {
 
   const peer = new WsPeer(socket, head, data => {
     if (established) {
-      if (remote && !remote.destroyed) remote.write(data);
+      if (remote && !remote.destroyed) {
+        const writable = remote.write(data);
+        if (!writable && !socket.destroyed) socket.pause();
+      }
       return;
     }
 
@@ -656,11 +728,11 @@ server.on('upgrade', (req, socket, head) => {
       return peer.close(1008);
     }
 
-    console.log('VLESS_REQUEST_ACCEPTED target_port=' + info.port + ' target_family=' + (net.isIP(info.host) || 'domain'));
+    trafficLog('VLESS_REQUEST_ACCEPTED target_port=' + info.port + ' target_family=' + (net.isIP(info.host) || 'domain'));
     remote = net.connect({ host: info.host, port: info.port });
 
     const fail = (err) => {
-      console.log('VLESS_OUTBOUND_FAIL reason=' + String(err?.code || err?.message || 'unknown'));
+      rateLimitedLog('outbound-fail', 'VLESS_OUTBOUND_FAIL reason=' + String(err?.code || err?.message || 'unknown'));
       try { if (remote) remote.destroy(); } catch {}
       peer.close(1011);
     };
@@ -668,18 +740,37 @@ server.on('upgrade', (req, socket, head) => {
     remote.setTimeout(60000, () => fail(new Error('timeout')));
     remote.once('connect', () => {
       established = true;
-      console.log('VLESS_OUTBOUND_READY');
+      trafficLog('VLESS_OUTBOUND_READY');
+      if (!firstProxySuccessLogged) {
+        firstProxySuccessLogged = true;
+        console.log('PROXY_FIRST_SUCCESS target_port=' + info.port + ' target_family=' + (net.isIP(info.host) || 'domain'));
+      }
       remote.setTimeout(0);
       peer.binary(Buffer.from([info.version, 0]));
-      if (info.payload.length) remote.write(info.payload);
+      if (info.payload.length) {
+        const writable = remote.write(info.payload);
+        if (!writable && !socket.destroyed) socket.pause();
+      }
     });
 
-    remote.on('data', chunk => peer.binary(chunk));
+    remote.on('drain', () => {
+      if (!socket.destroyed) socket.resume();
+    });
+    socket.on('drain', () => {
+      if (remote && !remote.destroyed) remote.resume();
+    });
+    remote.on('data', chunk => {
+      if (!peer.binary(chunk)) remote.pause();
+    });
     remote.on('end', () => peer.close());
     remote.on('error', fail);
   });
 
   peer.onClose = () => {
+    if (!connectionClosed) {
+      connectionClosed = true;
+      activeConnections = Math.max(0, activeConnections - 1);
+    }
     try { if (remote) remote.destroy(); } catch {}
   };
 });
@@ -746,11 +837,7 @@ async function onListen() {
   console.log('VLESS_LINK_FINAL ' + nodeUri());
 
   await registerNode();
-
-  setInterval(async () => {
-    if (!countryCode) await detectGeo();
-    await heartbeat();
-  }, heartbeatMinutes * 60000).unref();
+  scheduleRegistryRefresh();
 }
 
 server.listen(listenPort, listenHost, () => {
