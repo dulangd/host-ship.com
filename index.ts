@@ -3,7 +3,15 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const child = spawn(process.execPath, [join(here, 'index.js'), ...process.argv.slice(2)], {
+const entry = join(here, 'index.js');
+const execve = Reflect.get(process, 'execve');
+
+if (typeof execve === 'function') {
+  execve.call(process, process.execPath, [process.execPath, entry, ...process.argv.slice(2)], process.env);
+  throw new Error('process.execve unexpectedly returned');
+}
+
+const child = spawn(process.execPath, [entry, ...process.argv.slice(2)], {
   stdio: 'inherit',
   env: process.env
 });
