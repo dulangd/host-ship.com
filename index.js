@@ -983,9 +983,50 @@ async function onListen() {
   scheduleRegistryRefresh();
 }
 
-server.listen(listenPort, listenHost, () => {
-  onListen().catch(e => console.log('STARTUP_ASYNC_FAILED reason=' + String(e.message || e)));
-});
+if (process.env.HOSTSHIP_SELF_TEST === '1') {
+  function selfAssert(condition, message) {
+    if (!condition) throw new Error('SELF_TEST_FAILED ' + message);
+  }
+
+  const domain = Buffer.from('example.com', 'utf8');
+  const payload = Buffer.from('early-client-payload', 'utf8');
+  const request = Buffer.concat([
+    Buffer.from([0]),
+    expectedUuid,
+    Buffer.from([0, 1, 1, 187, 2, domain.length]),
+    domain,
+    payload
+  ]);
+
+  let accumulated = Buffer.alloc(0);
+  let parsed = null;
+  for (let offset = 0; offset < request.length; offset += 3) {
+    accumulated = Buffer.concat([accumulated, request.subarray(offset, offset + 3)]);
+    parsed = parseVlessRequest(accumulated);
+    if (parsed) break;
+  }
+
+  selfAssert(!!parsed, 'fragmented VLESS request did not complete');
+  selfAssert(parsed.host === 'example.com', 'domain parsing mismatch');
+  selfAssert(parsed.port === 443, 'port parsing mismatch');
+  selfAssert(parsed.payload.toString('utf8') === 'early-client-payload', 'early payload was not preserved');
+
+  const wrongUuidRequest = Buffer.from(request);
+  wrongUuidRequest[1] ^= 0xff;
+  let mismatchRejected = false;
+  try {
+    parseVlessRequest(wrongUuidRequest);
+  } catch (error) {
+    mismatchRejected = String(error.message || error) === 'uuid mismatch';
+  }
+  selfAssert(mismatchRejected, 'invalid UUID was not rejected');
+
+  console.log('SELF_TEST_OK fragmented_handshake=yes early_payload=yes uuid_auth=yes');
+} else {
+  server.listen(listenPort, listenHost, () => {
+    onListen().catch(e => console.log('STARTUP_ASYNC_FAILED reason=' + String(e.message || e)));
+  });
+}
 
 function shutdown(signal) {
   console.log('SHUTDOWN ' + signal);
