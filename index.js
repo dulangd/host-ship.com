@@ -168,6 +168,14 @@ let firstProxySuccessLogged = false;
 let activeConnections = 0;
 let totalConnections = 0;
 const rateLimitState = new Map();
+let registryFailureCount = 0;
+const REGISTRY_BACKOFF_BASE_MS = 30 * 60 * 1000;
+const REGISTRY_BACKOFF_MAX_MS = 6 * 60 * 60 * 1000;
+const MAX_PENDING_CLIENT_BYTES = 2 * 1024 * 1024;
+const RETRYABLE_CONNECT_ERRORS = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH',
+  'ENETUNREACH', 'EPIPE', 'EAI_AGAIN'
+]);
 
 function trafficLog(message) {
   if (verboseTrafficLogs) console.log(message);
@@ -343,13 +351,28 @@ async function registerNode({ quiet = false } = {}) {
     }
     const firstReady = !registryRegistered;
     registryRegistered = true;
+    registryFailureCount = 0;
     if (!quiet || firstReady) {
       console.log('REGISTRY_READY node_id=' + identity.nodeId + ' provider=host-ship mode=' + mode);
     }
     return true;
   } catch (e) {
     registryRegistered = false;
-    console.log('REGISTRY_REGISTER_FAILED mode=' + mode + ' reason=' + String(e.message || e));
+    const reason = String(e.message || e);
+    if (/HTTP 429\b/.test(reason)) {
+      registryFailureCount = Math.min(registryFailureCount + 1, 8);
+      const retryMs = Math.min(
+        REGISTRY_BACKOFF_MAX_MS,
+        REGISTRY_BACKOFF_BASE_MS * (2 ** (registryFailureCount - 1))
+      );
+      rateLimitedLog(
+        'registry-rate-limit',
+        'REGISTRY_REGISTER_DEFERRED reason=HTTP_429 retry_in_minutes=' + Math.ceil(retryMs / 60000),
+        10 * 60 * 1000
+      );
+    } else {
+      console.log('REGISTRY_REGISTER_FAILED mode=' + mode + ' reason=' + reason);
+    }
     return false;
   }
 }
@@ -365,6 +388,8 @@ async function heartbeat() {
       node_id: identity.nodeId,
       status: 'online'
     }, registryToken);
+    registryFailureCount = 0;
+    registryRegistered = true;
   } catch (e) {
     console.log('REGISTRY_HEARTBEAT_RECOVER reason=' + String(e.message || e));
     await registerNode({ quiet: true });
@@ -372,6 +397,12 @@ async function heartbeat() {
 }
 
 function registryRefreshDelayMs() {
+  if (registryFailureCount > 0) {
+    return Math.min(
+      REGISTRY_BACKOFF_MAX_MS,
+      REGISTRY_BACKOFF_BASE_MS * (2 ** (registryFailureCount - 1))
+    );
+  }
   if (registryToken) return heartbeatMinutes * 60000;
   const safeSeconds = Math.max(60, Math.floor(registryLeaseSeconds * 2 / 3));
   return safeSeconds * 1000;
@@ -412,18 +443,23 @@ function isPrivateIp(host) {
 }
 
 function parseVlessRequest(buf) {
-  if (!Buffer.isBuffer(buf) || buf.length < 24) throw new Error('short VLESS request');
+  if (!Buffer.isBuffer(buf)) throw new Error('invalid VLESS buffer');
+  if (buf.length < 17) return null;
 
   let i = 0;
   const version = buf[i++];
+  if (version !== 0) throw new Error('unsupported VLESS version');
+
   const id = buf.subarray(i, i + 16);
   i += 16;
+  if (id.length !== 16 || !crypto.timingSafeEqual(id, expectedUuid)) {
+    throw new Error('uuid mismatch');
+  }
 
-  if (id.length !== 16 || !crypto.timingSafeEqual(id, expectedUuid)) throw new Error('auth failed');
-
+  if (i >= buf.length) return null;
   const optLen = buf[i++];
+  if (i + optLen + 4 > buf.length) return null;
   i += optLen;
-  if (i + 4 > buf.length) throw new Error('invalid VLESS request');
 
   const command = buf[i++];
   if (command !== 1) throw new Error('only TCP CONNECT is supported');
@@ -434,17 +470,18 @@ function parseVlessRequest(buf) {
   let host = '';
 
   if (atyp === 1) {
-    if (i + 4 > buf.length) throw new Error('bad IPv4');
+    if (i + 4 > buf.length) return null;
     host = Array.from(buf.subarray(i, i + 4)).join('.');
     i += 4;
   } else if (atyp === 2) {
-    if (i >= buf.length) throw new Error('bad domain');
+    if (i >= buf.length) return null;
     const len = buf[i++];
-    if (!len || i + len > buf.length) throw new Error('bad domain');
+    if (!len) throw new Error('bad domain');
+    if (i + len > buf.length) return null;
     host = buf.subarray(i, i + len).toString('utf8');
     i += len;
   } else if (atyp === 3) {
-    if (i + 16 > buf.length) throw new Error('bad IPv6');
+    if (i + 16 > buf.length) return null;
     const words = [];
     for (let n = 0; n < 8; n++) words.push(buf.readUInt16BE(i + n * 2).toString(16));
     host = words.join(':');
@@ -710,6 +747,117 @@ server.on('upgrade', (req, socket, head) => {
 
   let remote = null;
   let established = false;
+  let handshakeComplete = false;
+  let clientHandshakeBuffer = Buffer.alloc(0);
+  let pendingClientChunks = [];
+  let pendingClientBytes = 0;
+  let connectRetryTimer = null;
+  let outboundAttempts = 0;
+
+  function queueClientData(data) {
+    if (!data || !data.length) return true;
+    pendingClientBytes += data.length;
+    if (pendingClientBytes > MAX_PENDING_CLIENT_BYTES) {
+      peer.close(1009);
+      return false;
+    }
+    pendingClientChunks.push(Buffer.from(data));
+    return true;
+  }
+
+  function flushClientData(target) {
+    if (!target || target.destroyed || peer.closed) return;
+    for (const chunk of pendingClientChunks) {
+      const writable = target.write(chunk);
+      if (!writable && !socket.destroyed) socket.pause();
+    }
+    pendingClientChunks = [];
+    pendingClientBytes = 0;
+  }
+
+  function failOutbound(err) {
+    rateLimitedLog(
+      'outbound-fail',
+      'VLESS_OUTBOUND_FAIL reason=' + String(err?.code || err?.message || 'unknown')
+    );
+    if (remote) {
+      const failed = remote;
+      remote = null;
+      try { failed.destroy(); } catch {}
+    }
+    peer.close(1011);
+  }
+
+  function connectOutbound(info) {
+    const maxAttempts = 3;
+
+    function attemptConnect() {
+      if (peer.closed) return;
+      outboundAttempts += 1;
+      const candidate = net.connect({ host: info.host, port: info.port });
+      remote = candidate;
+
+      candidate.setTimeout(60000, () => {
+        const timeoutError = new Error('outbound connect timeout');
+        timeoutError.code = 'ETIMEDOUT';
+        candidate.destroy(timeoutError);
+      });
+
+      candidate.once('connect', () => {
+        if (peer.closed || remote !== candidate) {
+          candidate.destroy();
+          return;
+        }
+        established = true;
+        candidate.setTimeout(0);
+        trafficLog('VLESS_OUTBOUND_READY');
+        if (!firstProxySuccessLogged) {
+          firstProxySuccessLogged = true;
+          console.log(
+            'PROXY_FIRST_SUCCESS target_port=' + info.port +
+            ' target_family=' + (net.isIP(info.host) || 'domain')
+          );
+        }
+        peer.binary(Buffer.from([info.version, 0]));
+        flushClientData(candidate);
+      });
+
+      candidate.on('drain', () => {
+        if (!socket.destroyed) socket.resume();
+      });
+      socket.on('drain', () => {
+        if (remote === candidate && !candidate.destroyed) candidate.resume();
+      });
+      candidate.on('data', chunk => {
+        if (!peer.binary(chunk)) candidate.pause();
+      });
+      candidate.on('end', () => peer.close());
+      candidate.on('error', err => {
+        if (remote !== candidate) return;
+        if (
+          !established &&
+          !peer.closed &&
+          RETRYABLE_CONNECT_ERRORS.has(String(err?.code || '')) &&
+          outboundAttempts < maxAttempts
+        ) {
+          remote = null;
+          try { candidate.destroy(); } catch {}
+          const delayMs = 300 * outboundAttempts;
+          rateLimitedLog(
+            'outbound-retry',
+            'VLESS_OUTBOUND_RETRY reason=' + String(err.code) +
+            ' attempt=' + outboundAttempts + '/' + maxAttempts,
+            10000
+          );
+          connectRetryTimer = setTimeout(attemptConnect, delayMs);
+          return;
+        }
+        failOutbound(err);
+      });
+    }
+
+    attemptConnect();
+  }
 
   const peer = new WsPeer(socket, head, data => {
     if (established) {
@@ -720,53 +868,48 @@ server.on('upgrade', (req, socket, head) => {
       return;
     }
 
+    if (handshakeComplete) {
+      queueClientData(data);
+      return;
+    }
+
+    clientHandshakeBuffer = Buffer.concat([clientHandshakeBuffer, data]);
+    if (clientHandshakeBuffer.length > MAX_PENDING_CLIENT_BYTES) {
+      rateLimitedLog('vless-handshake-large', 'VLESS_REJECT reason=handshake_too_large');
+      return peer.close(1009);
+    }
+
     let info;
     try {
-      info = parseVlessRequest(data);
+      info = parseVlessRequest(clientHandshakeBuffer);
     } catch (e) {
-      console.log('VLESS_REJECT reason=' + String(e.message || e));
+      const reason = String(e.message || e);
+      if (reason === 'uuid mismatch') {
+        rateLimitedLog('vless-auth', 'VLESS_REJECT reason=uuid_mismatch');
+      } else {
+        rateLimitedLog('vless-protocol', 'VLESS_REJECT reason=' + reason);
+      }
       return peer.close(1008);
     }
 
-    trafficLog('VLESS_REQUEST_ACCEPTED target_port=' + info.port + ' target_family=' + (net.isIP(info.host) || 'domain'));
-    remote = net.connect({ host: info.host, port: info.port });
-
-    const fail = (err) => {
-      rateLimitedLog('outbound-fail', 'VLESS_OUTBOUND_FAIL reason=' + String(err?.code || err?.message || 'unknown'));
-      try { if (remote) remote.destroy(); } catch {}
-      peer.close(1011);
-    };
-
-    remote.setTimeout(60000, () => fail(new Error('timeout')));
-    remote.once('connect', () => {
-      established = true;
-      trafficLog('VLESS_OUTBOUND_READY');
-      if (!firstProxySuccessLogged) {
-        firstProxySuccessLogged = true;
-        console.log('PROXY_FIRST_SUCCESS target_port=' + info.port + ' target_family=' + (net.isIP(info.host) || 'domain'));
-      }
-      remote.setTimeout(0);
-      peer.binary(Buffer.from([info.version, 0]));
-      if (info.payload.length) {
-        const writable = remote.write(info.payload);
-        if (!writable && !socket.destroyed) socket.pause();
-      }
-    });
-
-    remote.on('drain', () => {
-      if (!socket.destroyed) socket.resume();
-    });
-    socket.on('drain', () => {
-      if (remote && !remote.destroyed) remote.resume();
-    });
-    remote.on('data', chunk => {
-      if (!peer.binary(chunk)) remote.pause();
-    });
-    remote.on('end', () => peer.close());
-    remote.on('error', fail);
+    if (!info) return;
+    handshakeComplete = true;
+    clientHandshakeBuffer = Buffer.alloc(0);
+    if (!queueClientData(info.payload)) return;
+    connectOutbound(info);
   });
 
   peer.onClose = () => {
+    if (!connectionClosed) {
+      connectionClosed = true;
+      activeConnections = Math.max(0, activeConnections - 1);
+    }
+    if (connectRetryTimer) clearTimeout(connectRetryTimer);
+    connectRetryTimer = null;
+    const activeRemote = remote;
+    remote = null;
+    try { if (activeRemote) activeRemote.destroy(); } catch {}
+  };  peer.onClose = () => {
     if (!connectionClosed) {
       connectionClosed = true;
       activeConnections = Math.max(0, activeConnections - 1);
