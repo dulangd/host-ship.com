@@ -240,6 +240,24 @@ function subscriptionRaw() {
   return subscriptionUris().join('\n') + '\n';
 }
 
+function advertisedNodeSummary() {
+  return subscriptionUris().map((uri, index) => {
+    try {
+      const parsed = new URL(uri);
+      const query = parsed.searchParams;
+      return {
+        index: index + 1,
+        security: query.get('security') || 'none',
+        transport: query.get('type') || 'tcp',
+        flow: query.get('flow') || '',
+        sni: query.get('sni') || ''
+      };
+    } catch {
+      return { index: index + 1, security: 'unknown', transport: 'unknown', flow: '', sni: '' };
+    }
+  });
+}
+
 function publicBase() {
   const scheme = publicTls ? 'https' : 'http';
   const defaultPort = (publicTls && publicPort === 443) || (!publicTls && publicPort === 80);
@@ -716,6 +734,7 @@ function requestHandler(req, res) {
       connections: { active: activeConnections, total: totalConnections },
       subscription_nodes: subscriptionUris().length,
       advertised_security: primarySecurity || 'none',
+      advertised_nodes: advertisedNodeSummary(),
       verbose_traffic_logs: verboseTrafficLogs
     }));
   }
