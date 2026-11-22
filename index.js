@@ -143,12 +143,19 @@ const identity = loadIdentity();
 const registryProof = loadRegistryProof();
 const registryProofSha256 = sha256Hex(registryProof);
 const listenHost = process.env.LISTEN_HOST || '0.0.0.0';
-const listenPort = validPort(process.env.SERVER_PORT, validPort(process.env.PORT, 30376));
+const listenPort = validPort(
+  process.env.BACKEND_PORT,
+  validPort(process.env.SERVER_PORT, validPort(process.env.PORT, 30376))
+);
 const publicHost = String(process.env.PUBLIC_HOST || '45.131.65.244').trim();
-const publicPort = validPort(process.env.PUBLIC_PORT, listenPort);
+const publicPort = validPort(process.env.PUBLIC_PORT, validPort(process.env.SERVER_PORT, listenPort));
 const publicTls = envBool('PUBLIC_TLS', false);
 const publicWsHost = String(process.env.PUBLIC_WS_HOST || publicHost).trim();
 const allowPrivateTargets = envBool('ALLOW_PRIVATE_TARGETS', false);
+const primaryNodeUri = String(process.env.PRIMARY_NODE_URI || '').trim();
+const primaryTransport = String(process.env.PRIMARY_TRANSPORT || 'ws').trim().toLowerCase();
+const primarySecurity = String(process.env.PRIMARY_SECURITY || (publicTls ? 'tls' : 'none')).trim().toLowerCase();
+const primarySni = String(process.env.PRIMARY_SNI || '').trim();
 
 const registryBase = String(process.env.REGISTRY_URL || 'https://subscription-server-v2-production.up.railway.app').replace(/\/$/, '');
 const registerPath = normalizePath(process.env.REGISTRY_REGISTER_PATH || '/api/v1/register');
@@ -204,6 +211,7 @@ function refreshNodeName() {
 }
 
 function nodeUri() {
+  if (primaryNodeUri) return primaryNodeUri;
   const q = new URLSearchParams({
     encryption: 'none',
     security: publicTls ? 'tls' : 'none',
@@ -314,13 +322,16 @@ function registryPayload() {
     priority: 80,
     address: publicHost,
     port: publicPort,
-    transport: 'ws',
-    tls: publicTls,
+    transport: primaryTransport || 'ws',
+    tls: primarySecurity === 'tls',
     metadata: {
       location: countryCode || '',
       platform: 'Host-Ship.com',
-      runtime: 'NodeJS 24',
-      allocation: publicHost + ':' + publicPort
+      runtime: 'NodeJS 24 + rust-reality',
+      allocation: publicHost + ':' + publicPort,
+      transport: primaryTransport || 'ws',
+      security: primarySecurity || 'none',
+      sni: primarySni || ''
     }
   };
 }
@@ -674,8 +685,10 @@ function requestHandler(req, res) {
       public_host: publicHost,
       public_port: publicPort,
       endpoint: publicBase(),
-      transport: 'ws',
-      tls: publicTls,
+      transport: primaryTransport || 'ws',
+      tls: primarySecurity === 'tls',
+      security: primarySecurity || 'none',
+      sni: primarySni || null,
       node_id: identity.nodeId,
       country: countryCode || null,
       egress_ip: egressIp || null,
@@ -968,8 +981,12 @@ async function onListen() {
   refreshNodeName();
   writeOutput();
 
-  console.log('SERVICE_READY HTTP/WS ' + listenHost + ':' + listenPort);
-  console.log('NATIVE_READY ' + publicHost + ':' + publicPort + ' tls=' + (publicTls ? 'on' : 'off'));
+  console.log('SERVICE_READY HTTP/WS_BACKEND ' + listenHost + ':' + listenPort);
+  console.log(
+    'NATIVE_READY ' + publicHost + ':' + publicPort +
+    ' transport=' + (primaryTransport || 'ws') +
+    ' security=' + (primarySecurity || 'none')
+  );
   console.log('NODE_ID ' + identity.nodeId);
   console.log('VLESS_LINK ' + nodeUri());
   console.log('SUB_URL ' + publicBase() + subPath);
