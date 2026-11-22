@@ -240,6 +240,55 @@ function subscriptionRaw() {
   return subscriptionUris().join('\n') + '\n';
 }
 
+function shadowrocketUri(standardUri) {
+  const parsed = new URL(standardUri);
+  const q = parsed.searchParams;
+  const uuid = decodeURIComponent(parsed.username || '');
+  const host = parsed.hostname;
+  const port = parsed.port || '443';
+  const authority = Buffer.from('none:' + uuid + '@' + hostForUri(host) + ':' + port, 'utf8')
+    .toString('base64');
+  const params = new URLSearchParams();
+  const label = decodeURIComponent((parsed.hash || '').replace(/^#/, '')) || 'HostShip';
+
+  params.set('remarks', label);
+  params.set('udp', '1');
+
+  const security = String(q.get('security') || '').toLowerCase();
+  if (security === 'reality') {
+    params.set('tls', '1');
+    params.set('peer', q.get('sni') || '');
+    params.set('xtls', '2');
+    params.set('pbk', q.get('pbk') || '');
+    params.set('sid', q.get('sid') || '');
+    params.set('fp', q.get('fp') || 'chrome');
+    const spx = q.get('spx');
+    if (spx) params.set('spx', spx);
+  } else if (security === 'tls') {
+    params.set('tls', '1');
+    params.set('peer', q.get('sni') || '');
+    params.set('allowInsecure', '1');
+    params.set('obfs', q.get('type') === 'ws' ? 'websocket' : (q.get('type') || 'none'));
+    if (q.get('path')) params.set('path', q.get('path'));
+    if (q.get('host')) params.set('obfsParam', q.get('host'));
+    if (q.get('alpn')) params.set('alpn', q.get('alpn'));
+    params.set('fp', q.get('fp') || 'chrome');
+  } else {
+    params.set('tls', '0');
+  }
+
+  return 'vless://' + authority + '?' + params.toString();
+}
+
+function shadowrocketRaw() {
+  return subscriptionUris().map(shadowrocketUri).join('\n') + '\n';
+}
+
+function isShadowrocketRequest(req) {
+  const ua = String(req?.headers?.['user-agent'] || '');
+  return /shadowrocket/i.test(ua);
+}
+
 function advertisedNodeSummary() {
   return subscriptionUris().map((uri, index) => {
     try {
@@ -746,12 +795,13 @@ function requestHandler(req, res) {
 
   if (pathname === subPath) {
     res.writeHead(200, subscriptionHeaders());
-    return res.end(subscriptionRaw());
+    return res.end(isShadowrocketRequest(req) ? shadowrocketRaw() : subscriptionRaw());
   }
 
   if (pathname === sub64Path) {
     res.writeHead(200, subscriptionHeaders());
-    return res.end(Buffer.from(subscriptionRaw(), 'utf8').toString('base64') + '\n');
+    const raw = isShadowrocketRequest(req) ? shadowrocketRaw() : subscriptionRaw();
+    return res.end(Buffer.from(raw, 'utf8').toString('base64') + '\n');
   }
 
   res.writeHead(404, {
