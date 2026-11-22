@@ -160,7 +160,7 @@ function selectSni() {
   for (const candidate of SNI_CANDIDATES) {
     const latency = probeSni(candidate);
     if (latency != null) {
-      console.log('REALITY_SNI_READY sni=' + candidate + ' probe_ms=' + latency);
+      console.log('REALITY_TARGET_READY sni=' + candidate + ' probe_ms=' + latency);
       return candidate;
     }
   }

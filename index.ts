@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const entry = join(here, 'hostship-bootstrap.js');
+const entry = join(here, 'index.js');
 const execve = Reflect.get(process, 'execve');
 
 if (typeof execve === 'function') {
@@ -12,6 +12,7 @@ if (typeof execve === 'function') {
 }
 
 const child = spawn(process.execPath, [entry, ...process.argv.slice(2)], {
+  cwd: here,
   stdio: 'inherit',
   env: process.env
 });
@@ -24,8 +25,8 @@ child.on('exit', (code, signal) => {
   process.exit(code ?? 1);
 });
 
-for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => {
-    if (!child.killed) child.kill(sig);
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    if (!child.killed) child.kill(signal);
   });
 }

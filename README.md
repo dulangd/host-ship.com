@@ -1,82 +1,56 @@
-# host-ship.com
+# Host-Ship multi-node runtime
 
-Host-Ship native node runtime for the Container Test project.
+Public allocation: `45.131.65.244:30376`.
 
-## Current panel target
-
-- Docker image: Nodejs 24
-- Public allocation: `45.131.65.244:30376`
-- Repository: `https://github.com/dulangd/host-ship.com.git`
-- Branch: `main`
-- Main file: `index.ts`
-- No npm packages are required.
-
-Host-Ship's NodeJS egg falls through to `ts-node --esm` for `index.ts`. The entry wrapper replaces itself with Node and launches `hostship-bootstrap.js`.
-
-## Current architecture
-
-The public allocation now uses one TCP port for both REALITY and management HTTP:
+Host-Ship currently exposes one allocation only, so the runtime multiplexes three ingress types on the same public TCP port:
 
 ```text
 45.131.65.244:30376
-├─ raw TCP        -> rust-reality v1.6.1
-└─ HTTP / WS      -> local Node backend
-                    ├─ /health
-                    ├─ subscription endpoints
-                    └─ Public-Proof Registry endpoint
+├─ REALITY TLS ClientHello -> rust-reality v1.6.1
+├─ pinned TLS/WSS          -> local TLS terminator -> VLESS/WS backend
+└─ clear HTTP/WS           -> management + compatibility backend
 ```
 
-REALITY is the primary advertised node. The old WebSocket backend remains behind the mux for HTTP/WS compatibility and management, but subscriptions and Registry publish the REALITY URI.
+## Advertised nodes
 
-Persistent state lives under `/home/container/.hostship-node/`, including the REALITY identity and Public-Proof identity. Normal restarts keep the same credentials.
+The subscription advertises exactly two nodes:
 
-## Runtime output
+1. `VLESS + REALITY + TCP + xtls-rprx-vision` — primary.
+2. `VLESS + WebSocket + TLS` — fallback.
 
-A successful start should include:
+The TLS fallback uses a persistent self-signed leaf certificate plus Xray certificate pinning:
 
-- `REALITY_BINARY_READY`
-- `REALITY_BACKEND_READY`
-- `MUX_READY`
-- `SERVICE_READY HTTP/WS_BACKEND`
-- `HOSTSHIP_REALITY_READY`
-- `REALITY_LINK_FINAL`
-- `GEO_READY`
-- `REGISTRY_READY ... mode=public-proof` when Registry accepts the lease
+- URI field `pcs` = SHA-256 of the leaf certificate.
+- URI field `vcn` = pinned certificate name.
+- No `allowInsecure`.
+- No public `security=none` VLESS node is advertised.
 
-The generated REALITY link uses:
+The same TLS certificate/key is stored under `/home/container/.hostship-node/tls/` and survives normal restarts.
 
-- protocol: VLESS
-- transport: TCP
-- security: REALITY
-- flow: `xtls-rprx-vision`
-- fingerprint: `chrome`
-- public endpoint: `45.131.65.244:30376`
+## Panel startup
 
-## Public HTTP endpoints
+Both `index.js` and `index.ts` are launchers that enter the same `hostship-bootstrap.js`. This removes the dependency on Host-Ship's unusual `MAIN_FILE == "*.js"` startup check.
 
-The same public port still accepts clear HTTP requests through the protocol mux:
+With `AUTO_UPDATE=1`, use **Restart**, not Reinstall.
 
-- `GET /health`
-- `GET /<generated-token>/node`
-- `GET /<generated-token>/sub`
-- `GET /<generated-token>/sub64`
+## Expected startup markers
 
-The subscription endpoints return the REALITY URI while REALITY mode is active.
+```text
+REALITY_BINARY_READY ...
+REALITY_TARGET_READY ...
+REALITY_BACKEND_READY ...
+TLS_CERT_READY ...
+TLS_BACKEND_READY ...
+SERVICE_READY HTTP/WS_BACKEND ...
+MUX_READY ...
+HOSTSHIP_MULTI_NODE_READY node_count=2
+REALITY_LINK_FINAL vless://...
+TLS_WS_LINK_FINAL vless://...
+SUB_URL http://45.131.65.244:30376/<token>/sub
+SUB64_URL http://45.131.65.244:30376/<token>/sub64
+REGISTRY_READY ... mode=public-proof
+```
 
-## Registry
+Registry continues to publish the REALITY node as the primary endpoint and uses tokenless Public-Proof. Do not add a shared Registry token unless Public-Proof becomes impossible.
 
-Host-Ship continues to prefer **tokenless Public-Proof registration**. Do not add `REGISTRY_TOKEN` or `HOSTSHIP_REGISTER_TOKEN` unless Public-Proof becomes impossible and a fallback is explicitly required.
-
-The public `/health` endpoint stays available on port 30376 specifically so Registry proof verification can coexist with raw REALITY traffic.
-
-HTTP 429 from Registry is handled with backoff instead of rapid re-registration.
-
-## Panel operation
-
-With `AUTO_UPDATE=1`, a normal **Restart** is enough for the existing server to pull the latest repository changes. Do not Reinstall just for this REALITY migration; reinstalling risks unnecessary state loss.
-
-Optional environment variables:
-
-- `RR_SNI`: force a specific REALITY cover SNI.
-- `RR_REGENERATE=1`: regenerate the REALITY identity once. Leave unset during normal operation.
-- `PUBLIC_HOST`: override the public address; default is `45.131.65.244`.
+Persistent runtime state is under `/home/container/.hostship-node/`.

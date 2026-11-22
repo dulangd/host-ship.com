@@ -1,0 +1,43 @@
+name: Validate Host-Ship Multi Node
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "index.js"
+      - "index.ts"
+      - "hostship-backend.js"
+      - "hostship-bootstrap.js"
+      - "hostship-mux.js"
+      - "hostship-reality.js"
+      - "hostship-tls.js"
+      - "hostship-selftest.js"
+      - ".github/workflows/validate.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hostship-validate
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Syntax check
+        run: |
+          node --check index.js
+          node --check hostship-backend.js
+          node --check hostship-bootstrap.js
+          node --check hostship-mux.js
+          node --check hostship-reality.js
+          node --check hostship-tls.js
+          node --check hostship-selftest.js
+      - name: Protocol and TLS self-test
+        run: node hostship-selftest.js
