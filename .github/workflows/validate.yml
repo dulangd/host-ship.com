@@ -6,6 +6,9 @@ on:
     paths:
       - "index.js"
       - "index.ts"
+      - "hostship-bootstrap.js"
+      - "hostship-mux.js"
+      - "hostship-reality.js"
       - ".github/workflows/validate.yml"
   pull_request:
     branches: [main]
@@ -27,7 +30,11 @@ jobs:
         with:
           node-version: "24"
       - name: Syntax check
-        run: node --check index.js
+        run: |
+          node --check index.js
+          node --check hostship-bootstrap.js
+          node --check hostship-mux.js
+          node --check hostship-reality.js
       - name: Protocol self-test
         env:
           HOSTSHIP_SELF_TEST: "1"

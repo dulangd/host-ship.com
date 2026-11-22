@@ -1017,16 +1017,29 @@ if (process.env.HOSTSHIP_SELF_TEST === '1') {
 
   let accumulated = Buffer.alloc(0);
   let parsed = null;
+  let nextOffset = 0;
   for (let offset = 0; offset < request.length; offset += 3) {
-    accumulated = Buffer.concat([accumulated, request.subarray(offset, offset + 3)]);
+    const chunk = request.subarray(offset, offset + 3);
+    accumulated = Buffer.concat([accumulated, chunk]);
     parsed = parseVlessRequest(accumulated);
+    nextOffset = offset + chunk.length;
     if (parsed) break;
   }
 
   selfAssert(!!parsed, 'fragmented VLESS request did not complete');
   selfAssert(parsed.host === 'example.com', 'domain parsing mismatch');
   selfAssert(parsed.port === 443, 'port parsing mismatch');
-  selfAssert(parsed.payload.toString('utf8') === 'early-client-payload', 'early payload was not preserved');
+
+  // parseVlessRequest returns as soon as the header is complete. Bytes that arrive
+  // in later WebSocket frames are queued separately by the live connection handler.
+  const recoveredPayload = Buffer.concat([
+    parsed.payload,
+    request.subarray(nextOffset)
+  ]);
+  selfAssert(
+    recoveredPayload.toString('utf8') === 'early-client-payload',
+    'early payload was not preserved across fragmented frames'
+  );
 
   const wrongUuidRequest = Buffer.from(request);
   wrongUuidRequest[1] ^= 0xff;

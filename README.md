@@ -1,54 +1,82 @@
-# host-ship.com test
+# host-ship.com
 
-Container Test runtime for the first Host-Ship.com server.
+Host-Ship native node runtime for the Container Test project.
 
 ## Current panel target
 
 - Docker image: Nodejs 24
-- Allocation shown by Host-Ship: `45.131.65.244:30376`
+- Public allocation: `45.131.65.244:30376`
 - Repository: `https://github.com/dulangd/host-ship.com.git`
 - Branch: `main`
 - Main file: `index.ts`
 - No npm packages are required.
 
-The server binds `0.0.0.0` and prefers `SERVER_PORT`, then `PORT`, then the current allocation `30376`.
+Host-Ship's NodeJS egg falls through to `ts-node --esm` for `index.ts`. The entry wrapper replaces itself with Node and launches `hostship-bootstrap.js`.
 
-Host-Ship's current NodeJS egg compares `MAIN_FILE` against the literal string `*.js`, so ordinary names such as `index.js` fall through to `ts-node --esm`. For this provider, `index.ts` is therefore the intended panel entry point; it launches the actual `index.js` runtime with Node.
+## Current architecture
 
-## Test endpoints
+The public allocation now uses one TCP port for both REALITY and management HTTP:
+
+```text
+45.131.65.244:30376
+├─ raw TCP        -> rust-reality v1.6.1
+└─ HTTP / WS      -> local Node backend
+                    ├─ /health
+                    ├─ subscription endpoints
+                    └─ Public-Proof Registry endpoint
+```
+
+REALITY is the primary advertised node. The old WebSocket backend remains behind the mux for HTTP/WS compatibility and management, but subscriptions and Registry publish the REALITY URI.
+
+Persistent state lives under `/home/container/.hostship-node/`, including the REALITY identity and Public-Proof identity. Normal restarts keep the same credentials.
+
+## Runtime output
+
+A successful start should include:
+
+- `REALITY_BINARY_READY`
+- `REALITY_BACKEND_READY`
+- `MUX_READY`
+- `SERVICE_READY HTTP/WS_BACKEND`
+- `HOSTSHIP_REALITY_READY`
+- `REALITY_LINK_FINAL`
+- `GEO_READY`
+- `REGISTRY_READY ... mode=public-proof` when Registry accepts the lease
+
+The generated REALITY link uses:
+
+- protocol: VLESS
+- transport: TCP
+- security: REALITY
+- flow: `xtls-rprx-vision`
+- fingerprint: `chrome`
+- public endpoint: `45.131.65.244:30376`
+
+## Public HTTP endpoints
+
+The same public port still accepts clear HTTP requests through the protocol mux:
 
 - `GET /health`
 - `GET /<generated-token>/node`
 - `GET /<generated-token>/sub`
 - `GET /<generated-token>/sub64`
-- VLESS over WebSocket on a generated persistent path
 
-Identity is stored in `/home/container/.hostship-node/identity.json` so normal restarts preserve UUID, WebSocket path, subscription token and node ID.
+The subscription endpoints return the REALITY URI while REALITY mode is active.
 
-## First validation
+## Registry
 
-After setting the Git repository on an already-created server, reinstall the server once so the egg's install stage actually clones the repository. A normal Start only runs `git pull` when `/home/container/.git` already exists.
+Host-Ship continues to prefer **tokenless Public-Proof registration**. Do not add `REGISTRY_TOKEN` or `HOSTSHIP_REGISTER_TOKEN` unless Public-Proof becomes impossible and a fallback is explicitly required.
 
-Start with the native Host-Ship allocation only. The runtime prints:
+The public `/health` endpoint stays available on port 30376 specifically so Registry proof verification can coexist with raw REALITY traffic.
 
-- `SERVICE_READY`
-- `NATIVE_READY`
-- `DIAG_LOCAL_HTTP_OK`
-- `DIAG_DNS_OK` or a DNS note
-- `DIAG_PUBLIC_HAIRPIN_*`
-- `GEO_READY`
-- the native VLESS and subscription links
+HTTP 429 from Registry is handled with backoff instead of rapid re-registration.
 
-A failed hairpin probe does not by itself prove the external allocation is closed; the client-side test is authoritative.
+## Panel operation
 
-## Railway registry
+With `AUTO_UPDATE=1`, a normal **Restart** is enough for the existing server to pull the latest repository changes. Do not Reinstall just for this REALITY migration; reinstalling risks unnecessary state loss.
 
-Registry code is present but remains disabled until a token is supplied.
+Optional environment variables:
 
-Preferred secret file:
-
-`/home/container/registry_token.txt`
-
-The runtime uses stable ID `hostship-01-native`, provider `host-ship`, and the existing Railway registry API. Do not commit the token.
-
-Registry activation comes only after the native endpoint works in a real client.
+- `RR_SNI`: force a specific REALITY cover SNI.
+- `RR_REGENERATE=1`: regenerate the REALITY identity once. Leave unset during normal operation.
+- `PUBLIC_HOST`: override the public address; default is `45.131.65.244`.
