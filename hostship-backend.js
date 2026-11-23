@@ -177,6 +177,7 @@ let registryToken = registryForcePublicProof ? '' : readRegistryToken();
 let registryLeaseSeconds = 900;
 let registryRegistered = false;
 let registryLastError = '';
+let registryPermanentFailure = false;
 let registrySkipLogged = false;
 let registryRefreshTimer = null;
 let registryRefreshRunning = false;
@@ -189,8 +190,8 @@ let activeConnections = 0;
 let totalConnections = 0;
 const rateLimitState = new Map();
 let registryFailureCount = 0;
-const REGISTRY_BACKOFF_BASE_MS = 30 * 60 * 1000;
-const REGISTRY_BACKOFF_MAX_MS = 6 * 60 * 60 * 1000;
+const REGISTRY_BACKOFF_BASE_MS = 15 * 1000;
+const REGISTRY_BACKOFF_MAX_MS = 5 * 60 * 1000;
 const MAX_PENDING_CLIENT_BYTES = 2 * 1024 * 1024;
 const RETRYABLE_CONNECT_ERRORS = new Set([
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH',
@@ -505,10 +506,16 @@ async function registerNode({ quiet = false } = {}) {
     const reason = String(e.message || e).replace(/\s+/g, ' ').slice(0, 220);
     registryLastError = reason;
     if (/HTTP 403\b.*uri rejected/i.test(reason)) {
+      registryPermanentFailure = true;
       registryFailureCount = 8;
-    } else {
-      registryFailureCount = Math.min(registryFailureCount + 1, 8);
+      rateLimitedLog(
+        'registry-uri-rejected',
+        'REGISTRY_REGISTER_REJECTED_PERMANENT mode=' + mode + ' reason=' + reason,
+        60 * 60 * 1000
+      );
+      return false;
     }
+    registryFailureCount = Math.min(registryFailureCount + 1, 8);
     const retryMs = Math.min(
       REGISTRY_BACKOFF_MAX_MS,
       REGISTRY_BACKOFF_BASE_MS * (2 ** (registryFailureCount - 1))
@@ -517,14 +524,20 @@ async function registerNode({ quiet = false } = {}) {
       'registry-failure',
       'REGISTRY_REGISTER_DEFERRED mode=' + mode +
       ' reason=' + reason +
-      ' retry_in_minutes=' + Math.ceil(retryMs / 60000),
-      10 * 60 * 1000
+      ' retry_in_seconds=' + Math.ceil(retryMs / 1000),
+      60 * 1000
     );
     return false;
   }
 }
 
 async function heartbeat() {
+  if (!registryEnabled || !registryNodeUri) return;
+  if (registryForcePublicProof) {
+    registryToken = '';
+    await registerNode({ quiet: true });
+    return;
+  }
   registryToken = readRegistryToken();
   if (!registryToken) {
     await registerNode({ quiet: true });
@@ -556,7 +569,7 @@ function registryRefreshDelayMs() {
 }
 
 function scheduleRegistryRefresh() {
-  if (!registryEnabled || !registryNodeUri) return;
+  if (!registryEnabled || !registryNodeUri || registryPermanentFailure) return;
   if (registryRefreshTimer) clearTimeout(registryRefreshTimer);
   registryRefreshTimer = setTimeout(async () => {
     if (registryRefreshRunning) {
@@ -1067,12 +1080,6 @@ server.on('upgrade', (req, socket, head) => {
     const activeRemote = remote;
     remote = null;
     try { if (activeRemote) activeRemote.destroy(); } catch {}
-  };  peer.onClose = () => {
-    if (!connectionClosed) {
-      connectionClosed = true;
-      activeConnections = Math.max(0, activeConnections - 1);
-    }
-    try { if (remote) remote.destroy(); } catch {}
   };
 });
 
