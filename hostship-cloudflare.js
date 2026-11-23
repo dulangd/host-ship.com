@@ -86,54 +86,132 @@ function cfWsUri({ uuid, wsPath, hostname, label }) {
   );
 }
 
-async function startCloudflareTunnel({ token, hostname }) {
+async function waitForEdgeHealth(hostname, {
+  child = null,
+  timeoutMs = 120000,
+  getSpawnError = () => null
+} = {}) {
+  const host = normalizeHostname(hostname);
+  const url = 'https://' + host + '/health';
+  const deadline = Date.now() + timeoutMs;
+  let lastReason = 'edge_not_reachable';
+
+  while (Date.now() < deadline) {
+    const spawnError = getSpawnError();
+    if (spawnError) {
+      return { ready: false, reason: 'cloudflared_spawn_error=' + String(spawnError.code || spawnError.message || 'unknown') };
+    }
+    if (child && child.exitCode !== null) {
+      return { ready: false, reason: 'cloudflared_exited_code=' + String(child.exitCode) };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'user-agent': 'hostship-cloudflare-edge-check/1',
+          'cache-control': 'no-cache'
+        },
+        redirect: 'follow',
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        lastReason = 'edge_http_' + response.status;
+      } else {
+        const health = await response.json();
+        if (health && health.ok === true && health.service === 'hostship-native-node') {
+          return { ready: true, health };
+        }
+        lastReason = 'unexpected_origin_health';
+      }
+    } catch (error) {
+      lastReason = String(error?.name === 'AbortError' ? 'edge_request_timeout' : (error?.code || error?.message || 'edge_request_failed')).replace(/\\s+/g, '_').slice(0, 120);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 2500));
+  }
+
+  return { ready: false, reason: lastReason };
+}
+
+async function stopCloudflareTunnel(child) {
+  if (!child || child.exitCode !== null) return;
+  await new Promise(resolve => {
+    let finished = false;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      child.removeListener('exit', done);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      done();
+    }, 4000);
+    child.once('exit', done);
+    try { child.kill('SIGTERM'); } catch { done(); }
+  });
+}
+
+async function startCloudflareTunnel({ token, hostname, timeoutMs = 120000 }) {
   const tunnelToken = String(token || '').trim();
   const host = normalizeHostname(hostname);
 
   if (!tunnelToken && !host) {
     console.log('CF_TUNNEL_STANDBY ready_for_config=yes');
-    return null;
+    return { configured: false, ready: false, child: null };
   }
   if (!tunnelToken || !host) {
     console.log(
       'CF_TUNNEL_STANDBY ready_for_config=yes missing=' +
       (!tunnelToken ? 'token' : 'hostname')
     );
-    return null;
+    return { configured: false, ready: false, child: null };
   }
 
-  await downloadBinary();
+  let child = null;
+  try {
+    await downloadBinary();
 
-  const child = spawn(
-    BINARY,
-    ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--loglevel', 'warn', 'run'],
-    {
-      stdio: ['ignore', 'inherit', 'inherit'],
-      env: {
-        ...process.env,
-        TUNNEL_TOKEN: tunnelToken,
-        TUNNEL_TRANSPORT_PROTOCOL: 'http2'
+    let spawnError = null;
+    child = spawn(
+      BINARY,
+      ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--loglevel', 'warn', 'run'],
+      {
+        stdio: ['ignore', 'inherit', 'inherit'],
+        env: {
+          ...process.env,
+          TUNNEL_TOKEN: tunnelToken,
+          TUNNEL_TRANSPORT_PROTOCOL: 'http2'
+        }
       }
+    );
+    child.once('error', error => { spawnError = error; });
+
+    const edge = await waitForEdgeHealth(host, {
+      child,
+      timeoutMs,
+      getSpawnError: () => spawnError
+    });
+
+    if (!edge.ready) {
+      await stopCloudflareTunnel(child);
+      console.log('CF_TUNNEL_EDGE_FAILED hostname=' + host + ' reason=' + edge.reason);
+      return { configured: true, ready: false, child: null, hostname: host, reason: edge.reason };
     }
-  );
 
-  await new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.removeListener('exit', onExit);
-      if (error) reject(error);
-      else resolve();
-    };
-    const onExit = code => finish(new Error('cloudflared exited early; code=' + code));
-    const timer = setTimeout(() => finish(), 2500);
-    child.once('exit', onExit);
-  });
-
-  console.log('CF_TUNNEL_PROCESS_READY hostname=' + host + ' protocol=http2');
-  return { child, hostname: host };
+    console.log('CF_TUNNEL_EDGE_READY hostname=' + host + ' origin_health=yes protocol=http2');
+    return { configured: true, ready: true, child, hostname: host, health: edge.health };
+  } catch (error) {
+    if (child) await stopCloudflareTunnel(child);
+    const reason = String(error?.message || error).replace(/\\s+/g, ' ').slice(0, 180);
+    console.log('CF_TUNNEL_START_FAILED reason=' + reason);
+    return { configured: true, ready: false, child: null, hostname: host, reason };
+  }
 }
 
 module.exports = {
