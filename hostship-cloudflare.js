@@ -216,6 +216,8 @@ async function startCloudflareTunnel({ token, hostname, timeoutMs = 120000 }) {
 
 module.exports = {
   startCloudflareTunnel,
+  waitForEdgeHealth,
+  stopCloudflareTunnel,
   cfWsUri,
   normalizeHostname
 };
