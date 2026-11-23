@@ -52,6 +52,9 @@ jobs:
             "if (registryForcePublicProof)"
           ]) if(!back.includes(s)) throw new Error('backend missing '+s);
           const cf=require('./hostship-cloudflare.js');
+          for (const name of ['startCloudflareTunnel','waitForEdgeHealth','stopCloudflareTunnel','cfWsUri','normalizeHostname']) {
+            if (typeof cf[name] !== 'function') throw new Error('Cloudflare module export missing '+name);
+          }
           const uri=cf.cfWsUri({
             uuid:'1f7672c8-d15a-4174-a244-3a3e42b6e35b',
             wsPath:'/ws-test',
