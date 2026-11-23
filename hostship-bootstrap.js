@@ -235,6 +235,10 @@ async function main() {
 
   const cfBackendEnv = {
     ...backendEnv,
+    PUBLIC_HOST: CF_TUNNEL_HOSTNAME,
+    PUBLIC_PORT: '443',
+    PUBLIC_TLS: '1',
+    PUBLIC_WS_HOST: CF_TUNNEL_HOSTNAME,
     PRIMARY_NODE_URIS: directUris.concat(cfUri || []).filter(Boolean).join('\n'),
     REGISTRY_ENABLED: cfConfigured ? '1' : '0',
     REGISTRY_FORCE_PUBLIC_PROOF: '1',
