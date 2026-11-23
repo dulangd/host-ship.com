@@ -2,75 +2,81 @@
 
 Public allocation: `45.131.65.244:30376`.
 
-The runtime currently supports two direct nodes and a prepared Cloudflare Tunnel fallback:
+## Runtime layout
 
 ```text
 45.131.65.244:30376
-├─ REALITY/TCP              -> rust-reality v1.6.1
-├─ pinned TLS/WSS           -> local TLS terminator -> VLESS/WS backend
-└─ clear HTTP management    -> /health + subscriptions + Public-Proof
+├─ VLESS + REALITY + TCP
+├─ VLESS + pinned TLS + WS (self-signed diagnostic fallback)
+└─ HTTP health + subscription + local VLESS/WS origin
 
-Cloudflare Tunnel (optional)
-CF hostname:443
+Cloudflare fallback (enabled only after edge health verification)
+host-ship-01.pp1.de5.net:443
 └─ Cloudflare Edge TLS
    -> remotely-managed Tunnel
    -> http://127.0.0.1:18080
-   -> same VLESS/WS backend
+   -> local VLESS/WS origin
 ```
 
-## Direct nodes
+The Cloudflare node is standard VLESS + WebSocket + TLS on port 443. It does not carry raw REALITY TCP.
 
-1. `VLESS + REALITY + TCP + xtls-rprx-vision`.
-2. `VLESS + WebSocket + self-signed TLS` with Xray certificate pinning (`pcs`).
+## Cloudflare configuration
 
-The direct self-signed TLS node is retained for diagnosis/fallback. Standard Xray clients use certificate pinning; Shadowrocket receives its legacy compatibility form.
+Hostname: `host-ship-01.pp1.de5.net`
 
-## Cloudflare Tunnel node
-
-The third node is **prepared but disabled until both variables exist**:
-
-- `CF_TUNNEL_TOKEN`
-- `CF_TUNNEL_HOSTNAME`
-
-The local origin is fixed at:
+Published application route in the Cloudflare Zero Trust dashboard:
 
 ```text
-http://127.0.0.1:18080
+Public hostname: host-ship-01.pp1.de5.net
+Service type:   HTTP
+Service URL:    http://127.0.0.1:18080
+Path:            (empty)
 ```
 
-The current Host-Ship egg does not expose arbitrary `CF_TUNNEL_TOKEN` or `CF_TUNNEL_HOSTNAME` startup variables. The bootstrap therefore also supports a private runtime config file:
+The Host-Ship egg does not expose custom startup variables. The runtime reads the token from:
 
 `/home/container/.hostship-node/cloudflare.json`
 
-Create that file in the Host-Ship File Manager with this structure (replace the token locally; never commit the real token to GitHub):
+That file is written automatically by the private `dulangd/hostship-renew` installer workflow through the already verified Host-Ship Client API. Do not create it manually and never commit the real token to this repository.
 
-```json
-{
-  "hostname": "host-ship-01.pp1.de5.net",
-  "token": "PASTE_THE_NEW_TUNNEL_TOKEN_HERE"
-}
-```
+In the private `dulangd/hostship-renew` repository, add a repository secret:
 
-The bootstrap reads this file at startup and applies mode `0600`. Environment variables, if the provider exposes them later, take precedence over the file. With neither source configured, CF remains in standby and does not add a third subscription node.
+- Name: `CF_TUNNEL_TOKEN`
+- Value: the token portion from the Cloudflare connector command (not the `sudo cloudflared service install` text).
 
-For a remotely-managed Cloudflare Tunnel, configure its published application route so the public hostname points to the exact Service URL above. Then restart Host-Ship once.
+Existing secrets `HS_API_KEY` and `HS_SERVER_ID` are reused to write the private file and restart the server. The token is never printed in workflow logs.
 
-The runtime pins `cloudflared 2026.10.7` and verifies the official SHA-256 before execution. The tunnel token is passed through `TUNNEL_TOKEN` in the child environment, not as a command-line argument.
+After the secret is added, the installer workflow is triggered by a one-time commit to `.github/cf-install-trigger.txt` (or manually through Actions). It performs:
 
-When enabled, the subscription gains:
+1. Write `cloudflare.json` through the Host-Ship Client API.
+2. Read the file back and compare the token without printing it.
+3. Restart Host-Ship.
+4. Start cloudflared inside the Node.js process (no systemd and no sudo).
+5. Wait for `https://host-ship-01.pp1.de5.net/health` to return the Host-Ship origin health response.
+6. Only then restart the backend with the third CF node enabled.
+7. Verify the three-node subscription and tokenless Public-Proof registration.
 
-```text
-DE-HostShip-01-CF-Tunnel
-VLESS + WebSocket + TLS
-hostname:443
-```
+If the Cloudflare Edge route is not healthy, the runtime rolls back to the two direct nodes. It does not publish a non-working CF node.
 
-Cloudflare Tunnel is only used for HTTP/WebSocket transport. REALITY remains direct raw TCP; Cloudflare published hostnames do not transparently proxy arbitrary raw TCP to normal VLESS clients.
+## Runtime verification
+
+The cloudflared binary is pinned to version `2026.10.7`. Its SHA-256 is checked against the digest published in the official GitHub release metadata:
+
+`1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872`
+
+The process uses the remotely managed tunnel token through the `TUNNEL_TOKEN` environment variable. The token is not passed on the command line.
+
+## Registry
+
+The node runtime does not use Railway Registry Token or `HOSTSHIP_REGISTER_TOKEN`.
+
+- Before Cloudflare Edge health is confirmed: registry is disabled; no invalid direct REALITY/self-signed TLS URI is submitted.
+- After Cloudflare Edge health is confirmed: Public-Proof registers the standard CF TLS/WS URI, with the public endpoint `https://host-ship-01.pp1.de5.net`.
+- A permanent `403 uri rejected` is logged once and not retried continuously.
+- Transient network failures retry from 15 seconds with capped backoff.
 
 ## Stable state
 
-Persistent runtime state is under `/home/container/.hostship-node/`.
+Persistent state is under `/home/container/.hostship-node/`.
 
 Both `index.js` and `index.ts` enter the same bootstrap. With `AUTO_UPDATE=1`, use **Restart**, not Reinstall.
-
-Registry remains tokenless Public-Proof and continues to publish the direct REALITY node as primary.
