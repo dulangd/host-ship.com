@@ -165,10 +165,19 @@ const registryBase = String(process.env.REGISTRY_URL || 'https://subscription-se
 const registerPath = normalizePath(process.env.REGISTRY_REGISTER_PATH || '/api/v1/register');
 const heartbeatPath = normalizePath(process.env.REGISTRY_HEARTBEAT_PATH || '/api/v1/heartbeat');
 const heartbeatMinutes = Math.max(1, Number(process.env.REGISTRY_HEARTBEAT_MINUTES || 10) || 10);
+const registryEnabled = envBool('REGISTRY_ENABLED', true);
+const registryForcePublicProof = envBool('REGISTRY_FORCE_PUBLIC_PROOF', false);
+const registryNodeUri = String(process.env.REGISTRY_NODE_URI || '').trim();
+const registryEndpoint = String(process.env.REGISTRY_ENDPOINT || '').trim().replace(/\/$/, '');
+const registryTransport = String(process.env.REGISTRY_TRANSPORT || primaryTransport || 'ws').trim().toLowerCase();
+const registrySecurity = String(process.env.REGISTRY_SECURITY || primarySecurity || 'none').trim().toLowerCase();
+const registrySni = String(process.env.REGISTRY_SNI || primarySni || '').trim();
 const verboseTrafficLogs = envBool('VERBOSE_TRAFFIC_LOGS', false);
-let registryToken = readRegistryToken();
+let registryToken = registryForcePublicProof ? '' : readRegistryToken();
 let registryLeaseSeconds = 900;
 let registryRegistered = false;
+let registryLastError = '';
+let registrySkipLogged = false;
 let registryRefreshTimer = null;
 let registryRefreshRunning = false;
 
@@ -398,26 +407,35 @@ async function postJson(url, body, token = '') {
 }
 
 function registryPayload() {
+  const uri = registryNodeUri || nodeUri();
+  const parsed = new URL(uri);
+  const query = parsed.searchParams;
+  const security = String(query.get('security') || registrySecurity || 'none').toLowerCase();
+  const transport = String(query.get('type') || registryTransport || 'ws').toLowerCase();
+  const address = parsed.hostname;
+  const port = Number(parsed.port || (security === 'tls' ? 443 : 80));
+  const sni = String(query.get('sni') || registrySni || '');
+
   return {
     kind: 'proxy',
     node_id: identity.nodeId,
     name: nodeName,
     provider: 'host-ship',
     protocol: 'vless',
-    uri: nodeUri(),
+    uri,
     priority: 80,
-    address: publicHost,
-    port: publicPort,
-    transport: primaryTransport || 'ws',
-    tls: primarySecurity === 'tls',
+    address,
+    port,
+    transport,
+    tls: security === 'tls',
     metadata: {
       location: countryCode || '',
       platform: 'Host-Ship.com',
-      runtime: 'NodeJS 24 + rust-reality',
-      allocation: publicHost + ':' + publicPort,
-      transport: primaryTransport || 'ws',
-      security: primarySecurity || 'none',
-      sni: primarySni || ''
+      runtime: 'NodeJS 24 + cloudflared',
+      allocation: address + ':' + port,
+      transport,
+      security,
+      sni
     }
   };
 }
@@ -425,15 +443,43 @@ function registryPayload() {
 function publicRegistryPayload() {
   return {
     ...registryPayload(),
-    endpoint: publicBase(),
+    endpoint: registryEndpoint || publicBase(),
     proof: registryProof
   };
 }
 
+async function verifyRegistryEndpoint() {
+  if (!registryEndpoint) return;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const response = await fetch(registryEndpoint + '/health', {
+      headers: { 'user-agent': 'hostship-public-proof/1', 'cache-control': 'no-cache' },
+      signal: ctl.signal
+    });
+    if (!response.ok) throw new Error('registry endpoint health HTTP ' + response.status);
+    const health = await response.json();
+    if (health.registry_proof_sha256 !== registryProofSha256) {
+      throw new Error('registry endpoint proof mismatch');
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function registerNode({ quiet = false } = {}) {
-  registryToken = readRegistryToken();
+  if (!registryEnabled || !registryNodeUri) {
+    registryRegistered = false;
+    if (!registrySkipLogged) {
+      registrySkipLogged = true;
+      console.log('REGISTRY_SKIPPED reason=cf_tls_ws_node_not_configured');
+    }
+    return false;
+  }
+  registryToken = registryForcePublicProof ? '' : readRegistryToken();
   const mode = registryToken ? 'bearer-token' : 'public-proof';
   try {
+    if (!registryToken) await verifyRegistryEndpoint();
     let responseText = '';
     if (registryToken) {
       if (!quiet) console.log('REGISTRY_TOKEN_READY source=' + registryTokenSource);
@@ -448,6 +494,7 @@ async function registerNode({ quiet = false } = {}) {
     }
     const firstReady = !registryRegistered;
     registryRegistered = true;
+    registryLastError = '';
     registryFailureCount = 0;
     if (!quiet || firstReady) {
       console.log('REGISTRY_READY node_id=' + identity.nodeId + ' provider=host-ship mode=' + mode);
@@ -455,21 +502,24 @@ async function registerNode({ quiet = false } = {}) {
     return true;
   } catch (e) {
     registryRegistered = false;
-    const reason = String(e.message || e);
-    if (/HTTP 429\b/.test(reason)) {
-      registryFailureCount = Math.min(registryFailureCount + 1, 8);
-      const retryMs = Math.min(
-        REGISTRY_BACKOFF_MAX_MS,
-        REGISTRY_BACKOFF_BASE_MS * (2 ** (registryFailureCount - 1))
-      );
-      rateLimitedLog(
-        'registry-rate-limit',
-        'REGISTRY_REGISTER_DEFERRED reason=HTTP_429 retry_in_minutes=' + Math.ceil(retryMs / 60000),
-        10 * 60 * 1000
-      );
+    const reason = String(e.message || e).replace(/\s+/g, ' ').slice(0, 220);
+    registryLastError = reason;
+    if (/HTTP 403\b.*uri rejected/i.test(reason)) {
+      registryFailureCount = 8;
     } else {
-      console.log('REGISTRY_REGISTER_FAILED mode=' + mode + ' reason=' + reason);
+      registryFailureCount = Math.min(registryFailureCount + 1, 8);
     }
+    const retryMs = Math.min(
+      REGISTRY_BACKOFF_MAX_MS,
+      REGISTRY_BACKOFF_BASE_MS * (2 ** (registryFailureCount - 1))
+    );
+    rateLimitedLog(
+      'registry-failure',
+      'REGISTRY_REGISTER_DEFERRED mode=' + mode +
+      ' reason=' + reason +
+      ' retry_in_minutes=' + Math.ceil(retryMs / 60000),
+      10 * 60 * 1000
+    );
     return false;
   }
 }
@@ -506,6 +556,7 @@ function registryRefreshDelayMs() {
 }
 
 function scheduleRegistryRefresh() {
+  if (!registryEnabled || !registryNodeUri) return;
   if (registryRefreshTimer) clearTimeout(registryRefreshTimer);
   registryRefreshTimer = setTimeout(async () => {
     if (registryRefreshRunning) {
@@ -780,8 +831,12 @@ function requestHandler(req, res) {
       egress_ip: egressIp || null,
       geo: { country: countryCode || null, egress_ip: egressIp || null, verified: !!countryCode && !!egressIp },
       registry_proof_sha256: registryProofSha256,
-      registry_configured: true,
-      registry_auth_mode: readRegistryToken() ? 'bearer-token' : 'public-proof',
+      registry_configured: registryEnabled && !!registryNodeUri,
+      registry_enabled: registryEnabled && !!registryNodeUri,
+      registry_registered: registryRegistered,
+      registry_last_error: registryLastError || null,
+      registry_uri_security: registrySecurity || null,
+      registry_auth_mode: registryForcePublicProof ? 'public-proof' : (readRegistryToken() ? 'bearer-token' : 'public-proof'),
       connections: { active: activeConnections, total: totalConnections },
       subscription_nodes: subscriptionUris().length,
       advertised_security: primarySecurity || 'none',

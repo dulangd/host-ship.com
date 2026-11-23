@@ -200,6 +200,7 @@ async function main() {
   const configuredUris = [reality.uri, tlsUri];
   if (cfUri && CF_TUNNEL_TOKEN) configuredUris.push(cfUri);
 
+  const cfRegistryReady = Boolean(cfUri && CF_TUNNEL_TOKEN);
   const backendEnv = {
     ...process.env,
     BACKEND_PORT: String(httpPort),
@@ -211,6 +212,13 @@ async function main() {
     PRIMARY_TRANSPORT: 'tcp',
     PRIMARY_SECURITY: 'reality',
     PRIMARY_SNI: String(reality.meta.sni || ''),
+    REGISTRY_ENABLED: cfRegistryReady ? '1' : '0',
+    REGISTRY_FORCE_PUBLIC_PROOF: '1',
+    REGISTRY_NODE_URI: cfRegistryReady ? cfUri : '',
+    REGISTRY_ENDPOINT: cfRegistryReady ? 'https://' + CF_TUNNEL_HOSTNAME : '',
+    REGISTRY_TRANSPORT: cfRegistryReady ? 'ws' : '',
+    REGISTRY_SECURITY: cfRegistryReady ? 'tls' : '',
+    REGISTRY_SNI: cfRegistryReady ? CF_TUNNEL_HOSTNAME : '',
     UUID: identity.uuid,
     WSPATH: identity.wsPath,
     SUB_TOKEN: identity.subToken,
@@ -256,7 +264,7 @@ async function main() {
   else console.log('CF_TUNNEL_STANDBY origin=http://127.0.0.1:' + httpPort);
   console.log('SUB_URL ' + subUrl);
   console.log('SUB64_URL ' + sub64Url);
-  console.log('REGISTRY_PRIMARY reality');
+  console.log('REGISTRY_PRIMARY ' + (cfRegistryReady ? 'cf-tunnel-public-proof' : 'disabled-until-cf-tunnel-ready'));
   console.log('='.repeat(78));
 
   let shuttingDown = false;
