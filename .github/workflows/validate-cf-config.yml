@@ -1,0 +1,41 @@
+name: Validate Host-Ship CF Config Loader
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hostship-bootstrap.js"
+      - ".github/workflows/validate-cf-config.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Check runtime syntax and private-config loader
+        run: |
+          node --check index.js
+          node --check hostship-bootstrap.js
+          node --check hostship-cloudflare.js
+          node --check hostship-backend.js
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const source = fs.readFileSync('hostship-bootstrap.js','utf8');
+          for (const marker of [
+            "path.join(STATE_DIR, 'cloudflare.json')",
+            "function loadCloudflareConfig()",
+            "process.env.CF_TUNNEL_TOKEN || cfFileConfig.token",
+            "process.env.CF_TUNNEL_HOSTNAME || cfFileConfig.hostname"
+          ]) {
+            if (!source.includes(marker)) throw new Error('missing config loader marker: '+marker);
+          }
+          if (source.includes('console.log(CF_TUNNEL_TOKEN)')) throw new Error('token logging is forbidden');
+          console.log('CF_PRIVATE_CONFIG_LOADER_OK path=.hostship-node/cloudflare.json');
+          NODE
