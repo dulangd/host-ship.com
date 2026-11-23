@@ -267,7 +267,9 @@ function shadowrocketUri(standardUri) {
   } else if (security === 'tls') {
     params.set('tls', '1');
     params.set('peer', q.get('sni') || '');
-    params.set('allowInsecure', '1');
+    // Only the direct self-signed TLS node needs this legacy Shadowrocket bypass.
+    // Cloudflare hostname certificates are publicly trusted and must stay verified.
+    if (q.get('pcs')) params.set('allowInsecure', '1');
     params.set('obfs', q.get('type') === 'ws' ? 'websocket' : (q.get('type') || 'none'));
     if (q.get('path')) params.set('path', q.get('path'));
     if (q.get('host')) params.set('obfsParam', q.get('host'));

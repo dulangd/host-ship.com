@@ -2,55 +2,60 @@
 
 Public allocation: `45.131.65.244:30376`.
 
-Host-Ship currently exposes one allocation only, so the runtime multiplexes three ingress types on the same public TCP port:
+The runtime currently supports two direct nodes and a prepared Cloudflare Tunnel fallback:
 
 ```text
 45.131.65.244:30376
-├─ REALITY TLS ClientHello -> rust-reality v1.6.1
-├─ pinned TLS/WSS          -> local TLS terminator -> VLESS/WS backend
-└─ clear HTTP/WS           -> management + compatibility backend
+├─ REALITY/TCP              -> rust-reality v1.6.1
+├─ pinned TLS/WSS           -> local TLS terminator -> VLESS/WS backend
+└─ clear HTTP management    -> /health + subscriptions + Public-Proof
+
+Cloudflare Tunnel (optional)
+CF hostname:443
+└─ Cloudflare Edge TLS
+   -> remotely-managed Tunnel
+   -> http://127.0.0.1:18080
+   -> same VLESS/WS backend
 ```
 
-## Advertised nodes
+## Direct nodes
 
-The subscription advertises exactly two nodes:
+1. `VLESS + REALITY + TCP + xtls-rprx-vision`.
+2. `VLESS + WebSocket + self-signed TLS` with Xray certificate pinning (`pcs`).
 
-1. `VLESS + REALITY + TCP + xtls-rprx-vision` — primary.
-2. `VLESS + WebSocket + TLS` — fallback.
+The direct self-signed TLS node is retained for diagnosis/fallback. Standard Xray clients use certificate pinning; Shadowrocket receives its legacy compatibility form.
 
-The TLS fallback uses a persistent self-signed leaf certificate plus Xray certificate pinning:
+## Cloudflare Tunnel node
 
-- URI field `pcs` = SHA-256 of the leaf certificate.
-- URI field `vcn` = pinned certificate name.
-- No `allowInsecure`.
-- No public `security=none` VLESS node is advertised.
+The third node is **prepared but disabled until both variables exist**:
 
-The same TLS certificate/key is stored under `/home/container/.hostship-node/tls/` and survives normal restarts.
+- `CF_TUNNEL_TOKEN`
+- `CF_TUNNEL_HOSTNAME`
 
-## Panel startup
-
-Both `index.js` and `index.ts` are launchers that enter the same `hostship-bootstrap.js`. This removes the dependency on Host-Ship's unusual `MAIN_FILE == "*.js"` startup check.
-
-With `AUTO_UPDATE=1`, use **Restart**, not Reinstall.
-
-## Expected startup markers
+The local origin is fixed at:
 
 ```text
-REALITY_BINARY_READY ...
-REALITY_TARGET_READY ...
-REALITY_BACKEND_READY ...
-TLS_CERT_READY ...
-TLS_BACKEND_READY ...
-SERVICE_READY HTTP/WS_BACKEND ...
-MUX_READY ...
-HOSTSHIP_MULTI_NODE_READY node_count=2
-REALITY_LINK_FINAL vless://...
-TLS_WS_LINK_FINAL vless://...
-SUB_URL http://45.131.65.244:30376/<token>/sub
-SUB64_URL http://45.131.65.244:30376/<token>/sub64
-REGISTRY_READY ... mode=public-proof
+http://127.0.0.1:18080
 ```
 
-Registry continues to publish the REALITY node as the primary endpoint and uses tokenless Public-Proof. Do not add a shared Registry token unless Public-Proof becomes impossible.
+For a remotely-managed Cloudflare Tunnel, configure its published application route so the supplied public hostname points to that exact Service URL. Then set the two variables above and restart Host-Ship once.
+
+The runtime pins `cloudflared 2026.10.7` and verifies the official SHA-256 before execution. The tunnel token is passed through `TUNNEL_TOKEN` in the child environment, not as a command-line argument.
+
+When enabled, the subscription gains:
+
+```text
+DE-HostShip-01-CF-Tunnel
+VLESS + WebSocket + TLS
+hostname:443
+```
+
+Cloudflare Tunnel is only used for HTTP/WebSocket transport. REALITY remains direct raw TCP; Cloudflare published hostnames do not transparently proxy arbitrary raw TCP to normal VLESS clients.
+
+## Stable state
 
 Persistent runtime state is under `/home/container/.hostship-node/`.
+
+Both `index.js` and `index.ts` enter the same bootstrap. With `AUTO_UPDATE=1`, use **Restart**, not Reinstall.
+
+Registry remains tokenless Public-Proof and continues to publish the direct REALITY node as primary.

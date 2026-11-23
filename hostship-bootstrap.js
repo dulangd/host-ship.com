@@ -8,6 +8,7 @@ const { spawn } = require('node:child_process');
 const { HostShipMux } = require('./hostship-mux.js');
 const { startReality } = require('./hostship-reality.js');
 const { startTlsBackend, tlsWsUri } = require('./hostship-tls.js');
+const { startCloudflareTunnel, cfWsUri, normalizeHostname } = require('./hostship-cloudflare.js');
 
 const HOME = process.env.HOME || '/home/container';
 const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(HOME, '.hostship-node'));
@@ -15,6 +16,9 @@ const IDENTITY_FILE = path.join(STATE_DIR, 'identity.json');
 const PUBLIC_HOST = String(process.env.PUBLIC_HOST || '45.131.65.244').trim();
 const PUBLIC_PORT = validPort(process.env.SERVER_PORT || process.env.PORT || '30376', 'SERVER_PORT');
 const TLS_SNI = String(process.env.TLS_SNI || 'hostship-tls.invalid').trim().toLowerCase();
+const CF_ORIGIN_PORT = validPort(process.env.CF_ORIGIN_PORT || '18080', 'CF_ORIGIN_PORT');
+const CF_TUNNEL_TOKEN = String(process.env.CF_TUNNEL_TOKEN || '').trim();
+const CF_TUNNEL_HOSTNAME = normalizeHostname(process.env.CF_TUNNEL_HOSTNAME || '');
 
 function validPort(raw, label) {
   const value = Number(raw);
@@ -131,11 +135,15 @@ async function main() {
   const prefix = country ? country + '-' : '';
   const realityLabel = prefix + 'HostShip-01-Reality';
   const tlsLabel = prefix + 'HostShip-01-TLS-WS';
+  const cfLabel = prefix + 'HostShip-01-CF-Tunnel';
 
-  const excluded = new Set([PUBLIC_PORT]);
+  if (CF_ORIGIN_PORT === PUBLIC_PORT) {
+    throw new Error('CF_ORIGIN_PORT must differ from public allocation');
+  }
+  const excluded = new Set([PUBLIC_PORT, CF_ORIGIN_PORT]);
   const realityPort = await reservePort(excluded);
   const tlsPort = await reservePort(excluded);
-  const httpPort = await reservePort(excluded);
+  const httpPort = CF_ORIGIN_PORT;
 
   const reality = await startReality({
     backendPort: realityPort,
@@ -164,6 +172,16 @@ async function main() {
     label: tlsLabel
   });
 
+  const cfUri = CF_TUNNEL_HOSTNAME ? cfWsUri({
+    uuid: identity.uuid,
+    wsPath: identity.wsPath,
+    hostname: CF_TUNNEL_HOSTNAME,
+    label: cfLabel
+  }) : '';
+
+  const configuredUris = [reality.uri, tlsUri];
+  if (cfUri && CF_TUNNEL_TOKEN) configuredUris.push(cfUri);
+
   const backendEnv = {
     ...process.env,
     BACKEND_PORT: String(httpPort),
@@ -171,7 +189,7 @@ async function main() {
     PUBLIC_HOST,
     PUBLIC_PORT: String(PUBLIC_PORT),
     PRIMARY_NODE_URI: reality.uri,
-    PRIMARY_NODE_URIS: reality.uri + '\n' + tlsUri,
+    PRIMARY_NODE_URIS: configuredUris.join('\n'),
     PRIMARY_TRANSPORT: 'tcp',
     PRIMARY_SECURITY: 'reality',
     PRIMARY_SNI: String(reality.meta.sni || ''),
@@ -190,6 +208,11 @@ async function main() {
   });
   await waitForPort(httpPort, backend);
 
+  const cloudflare = await startCloudflareTunnel({
+    token: CF_TUNNEL_TOKEN,
+    hostname: CF_TUNNEL_HOSTNAME
+  });
+
   const mux = new HostShipMux({
     publicPort: PUBLIC_PORT,
     realityPort,
@@ -204,13 +227,15 @@ async function main() {
   const sub64Url = base + '/' + identity.subToken + '/sub64';
 
   console.log('='.repeat(78));
-  console.log('HOSTSHIP_MULTI_NODE_READY node_count=2');
+  console.log('HOSTSHIP_MULTI_NODE_READY node_count=' + configuredUris.length);
   console.log('PUBLIC_ENDPOINT ' + PUBLIC_HOST + ':' + PUBLIC_PORT);
   console.log('REALITY_TARGET_SNI ' + reality.meta.sni);
   console.log('TLS_FALLBACK_SNI ' + tlsBackend.sni);
   console.log('TLS_PIN_SHA256 ' + tlsBackend.fingerprint);
   console.log('REALITY_LINK_FINAL ' + reality.uri);
   console.log('TLS_WS_LINK_FINAL ' + tlsUri);
+  if (cfUri && cloudflare) console.log('CF_TUNNEL_LINK_FINAL ' + cfUri);
+  else console.log('CF_TUNNEL_STANDBY origin=http://127.0.0.1:' + httpPort);
   console.log('SUB_URL ' + subUrl);
   console.log('SUB64_URL ' + sub64Url);
   console.log('REGISTRY_PRIMARY reality');
@@ -223,7 +248,7 @@ async function main() {
     console.log('BOOTSTRAP_SHUTDOWN ' + signal);
     mux.close();
     try { tlsBackend.server.close(); } catch {}
-    for (const child of [backend, reality.child]) {
+    for (const child of [backend, reality.child, cloudflare?.child]) {
       try {
         if (child && child.exitCode === null) child.kill('SIGTERM');
       } catch {}
