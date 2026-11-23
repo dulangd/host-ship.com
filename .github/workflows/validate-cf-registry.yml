@@ -36,15 +36,33 @@ jobs:
           const boot=fs.readFileSync('hostship-bootstrap.js','utf8');
           const back=fs.readFileSync('hostship-backend.js','utf8');
           for(const s of [
-            "REGISTRY_NODE_URI: cfRegistryReady ? cfUri : ''",
-            "REGISTRY_ENDPOINT: cfRegistryReady ? 'https://' + CF_TUNNEL_HOSTNAME : ''",
-            "REGISTRY_ENABLED: cfRegistryReady ? '1' : '0'"
+            "REGISTRY_ENABLED: '0'",
+            "REGISTRY_NODE_URI: cfConfigured ? cfUri : ''",
+            "REGISTRY_ENDPOINT: cfConfigured ? 'https://' + CF_TUNNEL_HOSTNAME : ''",
+            "CF_TUNNEL_NODE_ACTIVE",
+            "waitForEdgeHealth(CF_TUNNEL_HOSTNAME"
           ]) if(!boot.includes(s)) throw new Error('bootstrap missing '+s);
           for(const s of [
             "registryNodeUri = String(process.env.REGISTRY_NODE_URI || '').trim()",
             "REGISTRY_SKIPPED reason=cf_tls_ws_node_not_configured",
             "registryRegistered",
-            "registryLastError"
+            "registryLastError",
+            "registryPermanentFailure",
+            "if (registryForcePublicProof)"
           ]) if(!back.includes(s)) throw new Error('backend missing '+s);
-          console.log('CF_REGISTRY_ROUTING_POLICY_OK');
+          const cf=require('./hostship-cloudflare.js');
+          const uri=cf.cfWsUri({
+            uuid:'1f7672c8-d15a-4174-a244-3a3e42b6e35b',
+            wsPath:'/ws-test',
+            hostname:'host-ship-01.pp1.de5.net',
+            label:'CF-Test'
+          });
+          const parsed=new URL(uri);
+          if(parsed.hostname!=='host-ship-01.pp1.de5.net' || parsed.port!=='443' ||
+             parsed.searchParams.get('security')!=='tls' ||
+             parsed.searchParams.get('type')!=='ws' ||
+             parsed.searchParams.has('pcs') || parsed.searchParams.has('vcn')) {
+            throw new Error('CF VLESS URI is not clean standard TLS/WS');
+          }
+          console.log('CF_REGISTRY_ROUTING_POLICY_OK uri=tls-ws-standard');
           NODE
