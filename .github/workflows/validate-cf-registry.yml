@@ -40,6 +40,10 @@ jobs:
             "REGISTRY_ENABLED: '0'",
             "REGISTRY_NODE_URI: cfConfigured ? cfUri : ''",
             "REGISTRY_ENDPOINT: cfConfigured ? 'https://' + CF_TUNNEL_HOSTNAME : ''",
+            "PUBLIC_HOST: CF_TUNNEL_HOSTNAME",
+            "PUBLIC_PORT: '443'",
+            "PUBLIC_TLS: '1'",
+            "PUBLIC_WS_HOST: CF_TUNNEL_HOSTNAME",
             "CF_TUNNEL_NODE_ACTIVE",
             "waitForEdgeHealth(CF_TUNNEL_HOSTNAME"
           ]) if(!boot.includes(s)) throw new Error('bootstrap missing '+s);
