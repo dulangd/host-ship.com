@@ -17,8 +17,7 @@ const PUBLIC_HOST = String(process.env.PUBLIC_HOST || '45.131.65.244').trim();
 const PUBLIC_PORT = validPort(process.env.SERVER_PORT || process.env.PORT || '30376', 'SERVER_PORT');
 const TLS_SNI = String(process.env.TLS_SNI || 'hostship-tls.invalid').trim().toLowerCase();
 const CF_ORIGIN_PORT = validPort(process.env.CF_ORIGIN_PORT || '18080', 'CF_ORIGIN_PORT');
-const CF_TUNNEL_TOKEN = String(process.env.CF_TUNNEL_TOKEN || '').trim();
-const CF_TUNNEL_HOSTNAME = normalizeHostname(process.env.CF_TUNNEL_HOSTNAME || '');
+const CF_CONFIG_FILE = path.join(STATE_DIR, 'cloudflare.json');
 
 function validPort(raw, label) {
   const value = Number(raw);
@@ -26,6 +25,20 @@ function validPort(raw, label) {
     throw new Error(label + ' must be a TCP port in 1..65535');
   }
   return value;
+}
+
+function loadCloudflareConfig() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(CF_CONFIG_FILE, 'utf8'));
+    try { fs.chmodSync(CF_CONFIG_FILE, 0o600); } catch {}
+    return {
+      token: String(parsed.token || '').trim(),
+      hostname: normalizeHostname(parsed.hostname || '')
+    };
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { token: '', hostname: '' };
+    throw new Error('Cloudflare config file is invalid; check .hostship-node/cloudflare.json');
+  }
 }
 
 function normalizePath(value) {
@@ -131,6 +144,11 @@ async function main() {
   if (!PUBLIC_HOST) throw new Error('PUBLIC_HOST is empty');
 
   const identity = ensureIdentity();
+  const cfFileConfig = loadCloudflareConfig();
+  const CF_TUNNEL_TOKEN = String(process.env.CF_TUNNEL_TOKEN || cfFileConfig.token || '').trim();
+  const CF_TUNNEL_HOSTNAME = normalizeHostname(
+    process.env.CF_TUNNEL_HOSTNAME || cfFileConfig.hostname || ''
+  );
   const country = await detectCountry();
   const prefix = country ? country + '-' : '';
   const realityLabel = prefix + 'HostShip-01-Reality';

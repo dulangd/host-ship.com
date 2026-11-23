@@ -38,7 +38,22 @@ The local origin is fixed at:
 http://127.0.0.1:18080
 ```
 
-For a remotely-managed Cloudflare Tunnel, configure its published application route so the supplied public hostname points to that exact Service URL. Then set the two variables above and restart Host-Ship once.
+The current Host-Ship egg does not expose arbitrary `CF_TUNNEL_TOKEN` or `CF_TUNNEL_HOSTNAME` startup variables. The bootstrap therefore also supports a private runtime config file:
+
+`/home/container/.hostship-node/cloudflare.json`
+
+Create that file in the Host-Ship File Manager with this structure (replace the token locally; never commit the real token to GitHub):
+
+```json
+{
+  "hostname": "host-ship-01.pp1.de5.net",
+  "token": "PASTE_THE_NEW_TUNNEL_TOKEN_HERE"
+}
+```
+
+The bootstrap reads this file at startup and applies mode `0600`. Environment variables, if the provider exposes them later, take precedence over the file. With neither source configured, CF remains in standby and does not add a third subscription node.
+
+For a remotely-managed Cloudflare Tunnel, configure its published application route so the public hostname points to the exact Service URL above. Then restart Host-Ship once.
 
 The runtime pins `cloudflared 2026.10.7` and verifies the official SHA-256 before execution. The tunnel token is passed through `TUNNEL_TOKEN` in the child environment, not as a command-line argument.
 
