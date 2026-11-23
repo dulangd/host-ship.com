@@ -53,8 +53,11 @@ After the secret is added, the installer workflow is triggered by a one-time com
 3. Restart Host-Ship.
 4. Start cloudflared inside the Node.js process (no systemd and no sudo).
 5. Wait for `https://host-ship-01.pp1.de5.net/health` to return the Host-Ship origin health response.
-6. Only then restart the backend with the third CF node enabled.
+6. Only then restart the backend with the third CF node enabled. In that CF-specific backend, `PUBLIC_HOST`, `PUBLIC_PORT=443`, `PUBLIC_TLS=1`, and `PUBLIC_WS_HOST` are aligned to the CF hostname so its health endpoint, advertised VLESS URI, and Railway's canonical `HOSTSHIP_PUBLIC_ENDPOINT` agree.
 7. Verify the three-node subscription and tokenless Public-Proof registration.
+8. Run an end-to-end Xray client test against the third VLESS TLS/WS node and fetch `https://www.cloudflare.com/cdn-cgi/trace` through its SOCKS inbound. The workflow verifies the official Xray release SHA-256 and reports success only after an HTTP 200 response through the proxy.
+
+Railway's registry service is configured with `HOSTSHIP_NODE_ID=hostship-01-native` and `HOSTSHIP_PUBLIC_ENDPOINT=https://host-ship-01.pp1.de5.net`. These are server-side enrollment values, not Host-Ship startup variables.
 
 If the Cloudflare Edge route is not healthy, the runtime rolls back to the two direct nodes. It does not publish a non-working CF node.
 
