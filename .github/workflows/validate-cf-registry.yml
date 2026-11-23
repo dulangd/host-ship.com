@@ -6,6 +6,7 @@ on:
     paths:
       - "hostship-bootstrap.js"
       - "hostship-backend.js"
+      - "hostship-cloudflare.js"
       - ".github/workflows/validate-cf-registry.yml"
 
 permissions:
