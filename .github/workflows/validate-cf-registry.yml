@@ -1,0 +1,50 @@
+name: Validate Host-Ship CF Registry Routing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hostship-bootstrap.js"
+      - "hostship-backend.js"
+      - ".github/workflows/validate-cf-registry.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Syntax and runtime self-tests
+        run: |
+          node --check index.js
+          node --check hostship-bootstrap.js
+          node --check hostship-backend.js
+          node --check hostship-cloudflare.js
+          node --check hostship-mux.js
+          node --check hostship-reality.js
+          node --check hostship-tls.js
+          HOSTSHIP_SELF_TEST=1 node hostship-backend.js
+          node hostship-selftest.js
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const boot=fs.readFileSync('hostship-bootstrap.js','utf8');
+          const back=fs.readFileSync('hostship-backend.js','utf8');
+          for(const s of [
+            "REGISTRY_NODE_URI: cfRegistryReady ? cfUri : ''",
+            "REGISTRY_ENDPOINT: cfRegistryReady ? 'https://' + CF_TUNNEL_HOSTNAME : ''",
+            "REGISTRY_ENABLED: cfRegistryReady ? '1' : '0'"
+          ]) if(!boot.includes(s)) throw new Error('bootstrap missing '+s);
+          for(const s of [
+            "registryNodeUri = String(process.env.REGISTRY_NODE_URI || '').trim()",
+            "REGISTRY_SKIPPED reason=cf_tls_ws_node_not_configured",
+            "registryRegistered",
+            "registryLastError"
+          ]) if(!back.includes(s)) throw new Error('backend missing '+s);
+          console.log('CF_REGISTRY_ROUTING_POLICY_OK');
+          NODE
