@@ -6,8 +6,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 
-const VERSION = '2026.10.7';
-const SHA256 = '1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872';
+const VERSION = '2026.11.2';
+const SHA256 = '56f13335143ec0e22772963290683a84a04114a35ec64cbc794a4d39ff9bb8cf';
 const DOWNLOAD_URL =
   'https://github.com/cloudflare/cloudflared/releases/download/' +
   VERSION + '/cloudflared-linux-amd64';
@@ -180,13 +180,12 @@ async function startCloudflareTunnel({ token, hostname, timeoutMs = 120000 }) {
     let spawnError = null;
     child = spawn(
       BINARY,
-      ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--loglevel', 'warn', 'run'],
+      ['tunnel', '--no-autoupdate', '--loglevel', 'warn', 'run'],
       {
         stdio: ['ignore', 'inherit', 'inherit'],
         env: {
           ...process.env,
-          TUNNEL_TOKEN: tunnelToken,
-          TUNNEL_TRANSPORT_PROTOCOL: 'http2'
+          TUNNEL_TOKEN: tunnelToken
         }
       }
     );
@@ -204,7 +203,7 @@ async function startCloudflareTunnel({ token, hostname, timeoutMs = 120000 }) {
       return { configured: true, ready: false, child: null, hostname: host, reason: edge.reason };
     }
 
-    console.log('CF_TUNNEL_EDGE_READY hostname=' + host + ' origin_health=yes protocol=http2');
+    console.log('CF_TUNNEL_EDGE_READY hostname=' + host + ' origin_health=yes protocol=auto');
     return { configured: true, ready: true, child, hostname: host, health: edge.health };
   } catch (error) {
     if (child) await stopCloudflareTunnel(child);
