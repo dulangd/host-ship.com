@@ -190,8 +190,8 @@ let activeConnections = 0;
 let totalConnections = 0;
 const rateLimitState = new Map();
 let registryFailureCount = 0;
-const REGISTRY_BACKOFF_BASE_MS = 15 * 1000;
-const REGISTRY_BACKOFF_MAX_MS = 5 * 60 * 1000;
+const REGISTRY_BACKOFF_BASE_MS = 60 * 1000;
+const REGISTRY_BACKOFF_MAX_MS = 15 * 60 * 1000;
 const MAX_PENDING_CLIENT_BYTES = 2 * 1024 * 1024;
 const RETRYABLE_CONNECT_ERRORS = new Set([
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH',
@@ -525,7 +525,7 @@ async function registerNode({ quiet = false } = {}) {
       'REGISTRY_REGISTER_DEFERRED mode=' + mode +
       ' reason=' + reason +
       ' retry_in_seconds=' + Math.ceil(retryMs / 1000),
-      60 * 1000
+      5 * 60 * 1000
     );
     return false;
   }
