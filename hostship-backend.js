@@ -434,7 +434,7 @@ function registryPayload() {
     metadata: {
       location: countryCode || '',
       platform: 'Host-Ship.com',
-      runtime: 'NodeJS 24 + cloudflared',
+      runtime: 'rust-reality 1.6.1 + NodeJS 24 + cloudflared',
       allocation: address + ':' + port,
       transport,
       security,
@@ -476,7 +476,7 @@ function publicRegistryPayloadForUri(uri, nodeId, endpoint) {
     metadata: {
       location: countryCode || '',
       platform: 'Host-Ship.com',
-      runtime: 'NodeJS 24 + cloudflared',
+      runtime: 'rust-reality 1.6.1 + NodeJS 24 + cloudflared',
       allocation: address + ':' + port,
       transport,
       security,
@@ -1197,6 +1197,11 @@ async function runStartupDiagnostics() {
     console.log('DIAG_DNS_OK host=' + publicHost + ' addresses=' + resolved.map(x => x.address + '/v' + x.family).join(','));
   } catch (e) {
     console.log('DIAG_DNS_FAIL host=' + publicHost + ' reason=' + String(e.code || e.message || e));
+  }
+
+  if (envBool('HOSTSHIP_REALITY_DIRECT', false)) {
+    console.log('DIAG_PUBLIC_HAIRPIN_SKIP reason=public_port_is_raw_reality');
+    return;
   }
 
   try {
