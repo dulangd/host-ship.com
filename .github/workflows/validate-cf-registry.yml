@@ -68,7 +68,9 @@ jobs:
           ]) if(!boot.includes(s)) throw new Error('bootstrap missing '+s);
           for(const s of [
             "function applyProfile(config, backendPort, listenHost = '127.0.0.1')",
-            "config.inbounds[0].listen = { mode: 'ipv4Only', ipv4: listenHost }",
+            "config.inbounds[0].listen = { mode: 'ipv4Only', ipv4: listenHost }"
+          ]) if(!reality.includes(s)) throw new Error('reality module missing '+s);
+          for(const s of [
             "registryNodeUri = String(process.env.REGISTRY_NODE_URI || '').trim()",
             "REGISTRY_SKIPPED reason=cf_tls_ws_node_not_configured",
             "registryRegistered",
