@@ -19,7 +19,7 @@ host-ship-01.pp1.de5.net:443
 
 This branch is a controlled performance comparison. Rust REALITY binds directly to the single public allocation. The Node.js MUX and direct TLS/WS fallback are bypassed. Cloudflare Tunnel remains an outbound connection to the local WS/HTTP origin, so no second public port is required.
 
-The branch defaults to direct Rust mode. Setting `HOSTSHIP_REALITY_DIRECT=0` restores the previous MUX + direct TLS/WS path for comparison. Returning to the `main` branch also restores the previous production topology.
+The branch defaults to direct Rust mode. The previous MUX + direct TLS/WS topology remains unchanged on `main`; use that branch as the rollback path.
 
 ## Identity preservation
 
