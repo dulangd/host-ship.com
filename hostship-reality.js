@@ -167,7 +167,7 @@ function selectSni() {
   throw new Error('no compatible REALITY cover SNI found');
 }
 
-function applyProfile(config, backendPort) {
+function applyProfile(config, backendPort, listenHost = '127.0.0.1') {
   config.log = {
     level: String(process.env.RR_LOG_LEVEL || 'error').toLowerCase(),
     output: 'stderr'
@@ -183,7 +183,7 @@ function applyProfile(config, backendPort) {
     throw new Error('generated REALITY config has no inbound');
   }
   config.inbounds[0].port = backendPort;
-  config.inbounds[0].listen = { mode: 'ipv4Only', ipv4: '127.0.0.1' };
+  config.inbounds[0].listen = { mode: 'ipv4Only', ipv4: listenHost };
   return config;
 }
 
@@ -192,7 +192,7 @@ function checkConfig(file, selfTest = false) {
   if (selfTest) run(BINARY, ['self-test', '--config', file], { timeoutMs: 30000 });
 }
 
-async function generateIdentity(backendPort) {
+async function generateIdentity(backendPort, listenHost = '127.0.0.1') {
   const sni = selectSni();
   const generated = run(BINARY, [
     'config', 'generate', 'standalone',
@@ -202,7 +202,7 @@ async function generateIdentity(backendPort) {
     '--server-name', sni
   ], { timeoutMs: 12000 });
 
-  const config = applyProfile(JSON.parse(generated.stdout), backendPort);
+  const config = applyProfile(JSON.parse(generated.stdout), backendPort, listenHost);
   const user = config?.inbounds?.[0]?.settings?.clients?.[0];
   const uuid = String(user?.id || '');
   const shortId = String(Array.isArray(user?.shortIds) ? user.shortIds[0] || '' : '');
@@ -224,19 +224,19 @@ async function generateIdentity(backendPort) {
   return meta;
 }
 
-async function loadOrCreateIdentity(backendPort) {
+async function loadOrCreateIdentity(backendPort, listenHost = '127.0.0.1') {
   if (process.env.RR_REGENERATE === '1') {
     await Promise.all([CONFIG, CLIENT_META].map(file => fsp.rm(file, { force: true })));
   }
 
   const hasConfig = fs.existsSync(CONFIG);
   const hasMeta = fs.existsSync(CLIENT_META);
-  if (!hasConfig && !hasMeta) return generateIdentity(backendPort);
+  if (!hasConfig && !hasMeta) return generateIdentity(backendPort, listenHost);
   if (!hasConfig || !hasMeta) {
     throw new Error('incomplete persisted REALITY state; set RR_REGENERATE=1 once');
   }
 
-  const config = applyProfile(JSON.parse(await fsp.readFile(CONFIG, 'utf8')), backendPort);
+  const config = applyProfile(JSON.parse(await fsp.readFile(CONFIG, 'utf8')), backendPort, listenHost);
   const meta = JSON.parse(await fsp.readFile(CLIENT_META, 'utf8'));
   for (const key of ['uuid', 'shortId', 'publicKey', 'sni']) {
     if (!meta[key]) throw new Error('persisted REALITY metadata missing ' + key);
@@ -297,12 +297,12 @@ function waitForListen(port, child, timeoutMs = 8000) {
   });
 }
 
-async function startReality({ backendPort, publicHost, publicPort, label }) {
+async function startReality({ backendPort, publicHost, publicPort, label, listenHost = '127.0.0.1' }) {
   if (process.platform !== 'linux' || process.arch !== 'x64') {
     throw new Error('Host-Ship REALITY requires Linux x86_64');
   }
   await installBinary();
-  const meta = await loadOrCreateIdentity(backendPort);
+  const meta = await loadOrCreateIdentity(backendPort, listenHost);
   const child = spawn(BINARY, ['serve', '--config', CONFIG], {
     stdio: ['ignore', 'inherit', 'inherit'],
     env: { ...process.env, RUST_BACKTRACE: process.env.RUST_BACKTRACE || '0' }
@@ -312,7 +312,7 @@ async function startReality({ backendPort, publicHost, publicPort, label }) {
 
   console.log(
     'REALITY_BACKEND_READY version=' + VERSION +
-    ' listen=127.0.0.1:' + backendPort +
+    ' listen=' + listenHost + ':' + backendPort +
     ' sni=' + meta.sni
   );
   return { child, meta, uri };
