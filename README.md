@@ -73,10 +73,13 @@ The process uses the remotely managed tunnel token through the `TUNNEL_TOKEN` en
 
 The node runtime does not use Railway Registry Token or `HOSTSHIP_REGISTER_TOKEN`.
 
-- Before Cloudflare Edge health is confirmed: registry is disabled; no invalid direct REALITY/self-signed TLS URI is submitted.
-- After Cloudflare Edge health is confirmed: Public-Proof registers the standard CF TLS/WS URI, with the public endpoint `https://host-ship-01.pp1.de5.net`.
+- Before Cloudflare Edge health is confirmed: registry is disabled; no unverified URI is submitted.
+- After Cloudflare Edge health is confirmed: Public-Proof registers the CF TLS/WS route as `hostship-01-native`.
+- The same proof also registers the independently verified direct REALITY/TCP route as `hostship-01-reality`, using the direct HTTP health endpoint `http://45.131.65.244:30376`.
+- The self-signed direct TLS/WS fallback remains a diagnostic route and is not placed in the public subscription.
+- Both public-proof registrations refresh on the runtime's lease-based schedule; the 900-second lease is refreshed at two-thirds of its lifetime.
 - A permanent `403 uri rejected` is logged once and not retried continuously.
-- Transient network failures retry from 15 seconds with capped backoff.
+- Transient network failures retry with capped backoff.
 
 ## Stable state
 
