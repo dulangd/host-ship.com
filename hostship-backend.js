@@ -178,6 +178,7 @@ let registryToken = registryForcePublicProof ? '' : readRegistryToken();
 let registryLeaseSeconds = 900;
 let registryRegistered = false;
 let registryAdditionalRegistered = false;
+let registryAdditionalLastError = '';
 let registryLastError = '';
 let registryPermanentFailure = false;
 let registrySkipLogged = false;
@@ -434,7 +435,7 @@ function registryPayload() {
     metadata: {
       location: countryCode || '',
       platform: 'Host-Ship.com',
-      runtime: 'NodeJS 24 + cloudflared',
+      runtime: 'rust-reality 1.6.1 + NodeJS 24 + cloudflared',
       allocation: address + ':' + port,
       transport,
       security,
@@ -476,7 +477,7 @@ function publicRegistryPayloadForUri(uri, nodeId, endpoint) {
     metadata: {
       location: countryCode || '',
       platform: 'Host-Ship.com',
-      runtime: 'NodeJS 24 + cloudflared',
+      runtime: 'rust-reality 1.6.1 + NodeJS 24 + cloudflared',
       allocation: address + ':' + port,
       transport,
       security,
@@ -491,6 +492,7 @@ function publicRegistryPayloadForUri(uri, nodeId, endpoint) {
 async function registerAdditionalNodes({ quiet = false } = {}) {
   if (!registryEnabled || !registryForcePublicProof || !registryDirectEndpoint || !registryProof) {
     registryAdditionalRegistered = false;
+    registryAdditionalLastError = 'not_configured';
     return false;
   }
   const realityUri = subscriptionUris().find(uri => {
@@ -504,8 +506,10 @@ async function registerAdditionalNodes({ quiet = false } = {}) {
   });
   if (!realityUri) {
     registryAdditionalRegistered = false;
+    registryAdditionalLastError = 'reality_uri_not_found';
     return false;
   }
+  registryAdditionalLastError = '';
   const prefix = identity.nodeId.replace(/-native$/i, '');
   const nodeId = prefix + '-reality';
   try {
@@ -522,6 +526,7 @@ async function registerAdditionalNodes({ quiet = false } = {}) {
     }
     const firstReady = !registryAdditionalRegistered;
     registryAdditionalRegistered = true;
+    registryAdditionalLastError = '';
     if (!quiet || firstReady) {
       console.log('REGISTRY_READY node_id=' + nodeId + ' provider=host-ship mode=public-proof route=reality action=' + String(response.action || 'confirmed'));
     }
@@ -529,6 +534,7 @@ async function registerAdditionalNodes({ quiet = false } = {}) {
   } catch (error) {
     registryAdditionalRegistered = false;
     const reason = String(error?.message || error).replace(/\s+/g, ' ').slice(0, 220);
+    registryAdditionalLastError = reason;
     rateLimitedLog(
       'registry-additional-failure',
       'REGISTRY_ADDITIONAL_DEFERRED node_id=' + nodeId + ' route=reality reason=' + reason,
@@ -938,6 +944,7 @@ function requestHandler(req, res) {
       registry_enabled: registryEnabled && !!registryNodeUri,
       registry_registered: registryRegistered,
       registry_additional_registered: registryAdditionalRegistered,
+      registry_additional_last_error: registryAdditionalLastError || null,
       registry_last_error: registryLastError || null,
       registry_uri_security: registrySecurity || null,
       registry_auth_mode: registryForcePublicProof ? 'public-proof' : (readRegistryToken() ? 'bearer-token' : 'public-proof'),
@@ -1197,6 +1204,11 @@ async function runStartupDiagnostics() {
     console.log('DIAG_DNS_OK host=' + publicHost + ' addresses=' + resolved.map(x => x.address + '/v' + x.family).join(','));
   } catch (e) {
     console.log('DIAG_DNS_FAIL host=' + publicHost + ' reason=' + String(e.code || e.message || e));
+  }
+
+  if (envBool('HOSTSHIP_REALITY_DIRECT', false)) {
+    console.log('DIAG_PUBLIC_HAIRPIN_SKIP reason=public_port_is_raw_reality');
+    return;
   }
 
   try {

@@ -24,6 +24,7 @@ const PUBLIC_PORT = validPort(process.env.SERVER_PORT || process.env.PORT || '30
 const TLS_SNI = String(process.env.TLS_SNI || 'hostship-tls.invalid').trim().toLowerCase();
 const CF_ORIGIN_PORT = validPort(process.env.CF_ORIGIN_PORT || '18080', 'CF_ORIGIN_PORT');
 const CF_CONFIG_FILE = path.join(STATE_DIR, 'cloudflare.json');
+const directMode = /^(1|true|yes|on)$/i.test(String(process.env.HOSTSHIP_REALITY_DIRECT || '1').trim());
 
 function validPort(raw, label) {
   const value = Number(raw);
@@ -165,36 +166,41 @@ async function main() {
     throw new Error('CF_ORIGIN_PORT must differ from public allocation');
   }
   const excluded = new Set([PUBLIC_PORT, CF_ORIGIN_PORT]);
-  const realityPort = await reservePort(excluded);
-  const tlsPort = await reservePort(excluded);
+  const realityPort = directMode ? PUBLIC_PORT : await reservePort(excluded);
+  const tlsPort = directMode ? null : await reservePort(excluded);
   const httpPort = CF_ORIGIN_PORT;
 
   const reality = await startReality({
     backendPort: realityPort,
     publicHost: PUBLIC_HOST,
     publicPort: PUBLIC_PORT,
-    label: realityLabel
+    label: realityLabel,
+    listenHost: directMode ? '0.0.0.0' : '127.0.0.1'
   });
 
-  if (String(reality.meta.sni || '').toLowerCase() === TLS_SNI) {
-    throw new Error('REALITY target SNI conflicts with TLS fallback SNI');
+  let tlsBackend = null;
+  let tlsUri = '';
+  if (!directMode) {
+    if (String(reality.meta.sni || '').toLowerCase() === TLS_SNI) {
+      throw new Error('REALITY target SNI conflicts with TLS fallback SNI');
+    }
+
+    tlsBackend = await startTlsBackend({
+      listenPort: tlsPort,
+      backendPort: httpPort,
+      sni: TLS_SNI
+    });
+
+    tlsUri = tlsWsUri({
+      uuid: identity.uuid,
+      wsPath: identity.wsPath,
+      publicHost: PUBLIC_HOST,
+      publicPort: PUBLIC_PORT,
+      sni: tlsBackend.sni,
+      fingerprint: tlsBackend.fingerprint,
+      label: tlsLabel
+    });
   }
-
-  const tlsBackend = await startTlsBackend({
-    listenPort: tlsPort,
-    backendPort: httpPort,
-    sni: TLS_SNI
-  });
-
-  const tlsUri = tlsWsUri({
-    uuid: identity.uuid,
-    wsPath: identity.wsPath,
-    publicHost: PUBLIC_HOST,
-    publicPort: PUBLIC_PORT,
-    sni: tlsBackend.sni,
-    fingerprint: tlsBackend.fingerprint,
-    label: tlsLabel
-  });
 
   const cfUri = CF_TUNNEL_HOSTNAME ? cfWsUri({
     uuid: identity.uuid,
@@ -203,7 +209,7 @@ async function main() {
     label: cfLabel
   }) : '';
 
-  const directUris = [reality.uri, tlsUri];
+  const directUris = [reality.uri, ...(tlsUri ? [tlsUri] : [])];
   const configuredUris = directUris.slice();
   const cfConfigured = Boolean(cfUri && CF_TUNNEL_TOKEN);
 
@@ -211,8 +217,10 @@ async function main() {
     ...process.env,
     BACKEND_PORT: String(httpPort),
     LISTEN_HOST: '127.0.0.1',
-    PUBLIC_HOST,
-    PUBLIC_PORT: String(PUBLIC_PORT),
+    PUBLIC_HOST: directMode && CF_TUNNEL_HOSTNAME ? CF_TUNNEL_HOSTNAME : PUBLIC_HOST,
+    PUBLIC_PORT: directMode && CF_TUNNEL_HOSTNAME ? '443' : String(PUBLIC_PORT),
+    PUBLIC_TLS: directMode && CF_TUNNEL_HOSTNAME ? '1' : '0',
+    PUBLIC_WS_HOST: directMode && CF_TUNNEL_HOSTNAME ? CF_TUNNEL_HOSTNAME : PUBLIC_HOST,
     PRIMARY_NODE_URI: reality.uri,
     PRIMARY_NODE_URIS: directUris.join('\n'),
     PRIMARY_TRANSPORT: 'tcp',
@@ -222,7 +230,7 @@ async function main() {
     REGISTRY_FORCE_PUBLIC_PROOF: '1',
     REGISTRY_NODE_URI: '',
     REGISTRY_ENDPOINT: '',
-    REGISTRY_DIRECT_ENDPOINT: 'http://' + PUBLIC_HOST + ':' + PUBLIC_PORT,
+    REGISTRY_DIRECT_ENDPOINT: directMode && CF_TUNNEL_HOSTNAME ? 'https://' + CF_TUNNEL_HOSTNAME : 'http://' + PUBLIC_HOST + ':' + PUBLIC_PORT,
     REGISTRY_TRANSPORT: '',
     REGISTRY_SECURITY: '',
     REGISTRY_SNI: '',
@@ -231,7 +239,8 @@ async function main() {
     SUB_TOKEN: identity.subToken,
     NODE_ID: identity.nodeId,
     NODE_NAME: String(process.env.NODE_NAME || 'HostShip-01-Reality'),
-    HOSTSHIP_REALITY_MODE: '1'
+    HOSTSHIP_REALITY_MODE: '1',
+    HOSTSHIP_REALITY_DIRECT: directMode ? '1' : '0'
   };
 
   const cfBackendEnv = {
@@ -251,7 +260,7 @@ async function main() {
     NODE_NAME: 'HostShip-01-CF-Tunnel'
   };
 
-  const mux = new HostShipMux({
+  const mux = directMode ? null : new HostShipMux({
     publicPort: PUBLIC_PORT,
     realityPort,
     tlsPort,
@@ -308,8 +317,8 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log('BOOTSTRAP_SHUTDOWN ' + signal);
-    mux.close();
-    try { tlsBackend.server.close(); } catch {}
+    if (mux) mux.close();
+    if (tlsBackend) { try { tlsBackend.server.close(); } catch {} }
     for (const child of [backend, reality.child, cloudflare?.child]) {
       try {
         if (child && child.exitCode === null) child.kill('SIGTERM');
@@ -324,7 +333,9 @@ async function main() {
   backend = spawnBackend(backendEnv);
   watchBackend(backend);
   await waitForPort(httpPort, backend);
-  await mux.start();
+  if (mux) await mux.start();
+
+  const expectedSubscriptionNodes = directUris.length + 1;
 
   if (cfConfigured) {
     cloudflare = await startCloudflareTunnel({
@@ -346,11 +357,11 @@ async function main() {
 
       if (
         edgeAfterPublish.ready &&
-        Number(edgeAfterPublish.health?.subscription_nodes) === 3
+        Number(edgeAfterPublish.health?.subscription_nodes) === expectedSubscriptionNodes
       ) {
         cfActive = true;
         configuredUris.push(cfUri);
-        console.log('CF_TUNNEL_NODE_ACTIVE hostname=' + CF_TUNNEL_HOSTNAME + ' subscription_nodes=3');
+        console.log('CF_TUNNEL_NODE_ACTIVE hostname=' + CF_TUNNEL_HOSTNAME + ' subscription_nodes=' + expectedSubscriptionNodes);
         cloudflare.child.once('exit', (code, signal) => {
           if (!shuttingDown) {
             console.error('CF_TUNNEL_PROCESS_EXIT code=' + String(code) + ' signal=' + String(signal || ''));
@@ -359,7 +370,7 @@ async function main() {
       } else {
         console.log(
           'CF_TUNNEL_ROLLBACK reason=' +
-          String(edgeAfterPublish.reason || 'three_node_edge_health_not_confirmed')
+          String(edgeAfterPublish.reason || ('expected_' + expectedSubscriptionNodes + '_node_edge_health_not_confirmed'))
         );
         await stopProcess(backend);
         await stopCloudflareTunnel(cloudflare.child);
@@ -376,22 +387,32 @@ async function main() {
     console.log('CF_TUNNEL_STANDBY origin=http://127.0.0.1:' + httpPort);
   }
 
-  const base = 'http://' + PUBLIC_HOST + ':' + PUBLIC_PORT;
+  const base = directMode
+    ? (cfActive ? 'https://' + CF_TUNNEL_HOSTNAME : '')
+    : 'http://' + PUBLIC_HOST + ':' + PUBLIC_PORT;
   const subUrl = base + '/' + identity.subToken + '/sub';
   const sub64Url = base + '/' + identity.subToken + '/sub64';
 
   console.log('='.repeat(78));
-  console.log('HOSTSHIP_MULTI_NODE_READY node_count=' + configuredUris.length);
+  console.log((directMode ? 'HOSTSHIP_RUST_DIRECT_READY' : 'HOSTSHIP_MULTI_NODE_READY') + ' node_count=' + configuredUris.length);
+  console.log('REALITY_CORE rust-reality/1.6.1');
   console.log('PUBLIC_ENDPOINT ' + PUBLIC_HOST + ':' + PUBLIC_PORT);
+  console.log('REALITY_LISTEN ' + (directMode ? '0.0.0.0:' : '127.0.0.1:') + realityPort);
   console.log('REALITY_TARGET_SNI ' + reality.meta.sni);
-  console.log('TLS_FALLBACK_SNI ' + tlsBackend.sni);
-  console.log('TLS_PIN_SHA256 ' + tlsBackend.fingerprint);
+  if (tlsBackend) {
+    console.log('TLS_FALLBACK_SNI ' + tlsBackend.sni);
+    console.log('TLS_PIN_SHA256 ' + tlsBackend.fingerprint);
+  }
   console.log('REALITY_LINK_FINAL ' + reality.uri);
-  console.log('TLS_WS_LINK_FINAL ' + tlsUri);
+  if (tlsUri) console.log('TLS_WS_LINK_FINAL ' + tlsUri);
   if (cfActive) console.log('CF_TUNNEL_LINK_FINAL ' + cfUri);
   else console.log('CF_TUNNEL_STANDBY origin=http://127.0.0.1:' + httpPort);
-  console.log('SUB_URL ' + subUrl);
-  console.log('SUB64_URL ' + sub64Url);
+  if (base) {
+    console.log('SUB_URL ' + subUrl);
+    console.log('SUB64_URL ' + sub64Url);
+  } else {
+    console.log('SUB_URL_UNAVAILABLE reason=CF_TUNNEL_NOT_ACTIVE');
+  }
   console.log('REGISTRY_PRIMARY ' + (cfActive ? 'cf-tunnel-public-proof' : 'disabled-until-cf-tunnel-ready'));
   console.log('='.repeat(78));
 
@@ -403,13 +424,15 @@ async function main() {
     }
   });
 
-  tlsBackend.server.once('close', () => {
-    if (!shuttingDown) {
-      console.error('TLS_BACKEND_EXIT');
-      shutdown('tls-exit');
-      process.exitCode = 1;
-    }
-  });
+  if (tlsBackend) {
+    tlsBackend.server.once('close', () => {
+      if (!shuttingDown) {
+        console.error('TLS_BACKEND_EXIT');
+        shutdown('tls-exit');
+        process.exitCode = 1;
+      }
+    });
+  }
 }
 
 main().catch(error => {
