@@ -2,9 +2,10 @@ name: Validate Host-Ship CF Registry Routing
 
 on:
   push:
-    branches: [main]
+    branches: [main, hostship-rust-direct-benchmark]
     paths:
       - "hostship-bootstrap.js"
+      - "hostship-reality.js"
       - "hostship-backend.js"
       - "hostship-cloudflare.js"
       - ".github/workflows/validate-cf-registry.yml"
@@ -12,6 +13,7 @@ on:
     branches: [main]
     paths:
       - "hostship-bootstrap.js"
+      - "hostship-reality.js"
       - "hostship-backend.js"
       - "hostship-cloudflare.js"
       - "hostship-selftest.js"
@@ -44,19 +46,29 @@ jobs:
           const fs=require('node:fs');
           const boot=fs.readFileSync('hostship-bootstrap.js','utf8');
           const back=fs.readFileSync('hostship-backend.js','utf8');
+          const reality=fs.readFileSync('hostship-reality.js','utf8');
           for(const s of [
+            "const directMode = /^(1|true|yes|on)$/i.test(String(process.env.HOSTSHIP_REALITY_DIRECT || '1').trim())",
+            "const realityPort = directMode ? PUBLIC_PORT : await reservePort(excluded)",
+            "if (mux) await mux.start()",
+            "const expectedSubscriptionNodes = directUris.length + 1",
             "REGISTRY_ENABLED: '0'",
             "REGISTRY_NODE_URI: cfConfigured ? cfUri : ''",
             "REGISTRY_ENDPOINT: cfConfigured ? 'https://' + CF_TUNNEL_HOSTNAME : ''",
-            "REGISTRY_DIRECT_ENDPOINT: 'http://' + PUBLIC_HOST + ':' + PUBLIC_PORT",
+            "REGISTRY_DIRECT_ENDPOINT: directMode && CF_TUNNEL_HOSTNAME ? 'https://' + CF_TUNNEL_HOSTNAME : 'http://' + PUBLIC_HOST + ':' + PUBLIC_PORT",
             "PUBLIC_HOST: CF_TUNNEL_HOSTNAME",
             "PUBLIC_PORT: '443'",
             "PUBLIC_TLS: '1'",
             "PUBLIC_WS_HOST: CF_TUNNEL_HOSTNAME",
+            "HOSTSHIP_REALITY_DIRECT: directMode ? '1' : '0'",
+            "listenHost: directMode ? '0.0.0.0' : '127.0.0.1'",
+            "Number(edgeAfterPublish.health?.subscription_nodes) === expectedSubscriptionNodes",
             "CF_TUNNEL_NODE_ACTIVE",
             "waitForEdgeHealth(CF_TUNNEL_HOSTNAME"
           ]) if(!boot.includes(s)) throw new Error('bootstrap missing '+s);
           for(const s of [
+            "function applyProfile(config, backendPort, listenHost = '127.0.0.1')",
+            "config.inbounds[0].listen = { mode: 'ipv4Only', ipv4: listenHost }",
             "registryNodeUri = String(process.env.REGISTRY_NODE_URI || '').trim()",
             "REGISTRY_SKIPPED reason=cf_tls_ws_node_not_configured",
             "registryRegistered",
