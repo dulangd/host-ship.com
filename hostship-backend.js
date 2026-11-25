@@ -169,6 +169,7 @@ const registryEnabled = envBool('REGISTRY_ENABLED', true);
 const registryForcePublicProof = envBool('REGISTRY_FORCE_PUBLIC_PROOF', false);
 const registryNodeUri = String(process.env.REGISTRY_NODE_URI || '').trim();
 const registryEndpoint = String(process.env.REGISTRY_ENDPOINT || '').trim().replace(/\/$/, '');
+const registryDirectEndpoint = String(process.env.REGISTRY_DIRECT_ENDPOINT || '').trim().replace(/\/$/, '');
 const registryTransport = String(process.env.REGISTRY_TRANSPORT || primaryTransport || 'ws').trim().toLowerCase();
 const registrySecurity = String(process.env.REGISTRY_SECURITY || primarySecurity || 'none').trim().toLowerCase();
 const registrySni = String(process.env.REGISTRY_SNI || primarySni || '').trim();
@@ -176,6 +177,7 @@ const verboseTrafficLogs = envBool('VERBOSE_TRAFFIC_LOGS', false);
 let registryToken = registryForcePublicProof ? '' : readRegistryToken();
 let registryLeaseSeconds = 900;
 let registryRegistered = false;
+let registryAdditionalRegistered = false;
 let registryLastError = '';
 let registryPermanentFailure = false;
 let registrySkipLogged = false;
@@ -449,6 +451,93 @@ function publicRegistryPayload() {
   };
 }
 
+function publicRegistryPayloadForUri(uri, nodeId, endpoint) {
+  const parsed = new URL(uri);
+  const query = parsed.searchParams;
+  const security = String(query.get('security') || 'none').toLowerCase();
+  const transport = String(query.get('type') || 'tcp').toLowerCase();
+  const address = parsed.hostname;
+  const port = Number(parsed.port || (security === 'tls' ? 443 : 80));
+  const encodedLabel = String(parsed.hash || '').replace(/^#/, '');
+  let name = 'HostShip-01-Reality';
+  try { if (encodedLabel) name = decodeURIComponent(encodedLabel); } catch {}
+  return {
+    kind: 'proxy',
+    node_id: nodeId,
+    name,
+    provider: 'host-ship',
+    protocol: 'vless',
+    uri,
+    priority: 80,
+    address,
+    port,
+    transport,
+    tls: security === 'tls',
+    metadata: {
+      location: countryCode || '',
+      platform: 'Host-Ship.com',
+      runtime: 'NodeJS 24 + cloudflared',
+      allocation: address + ':' + port,
+      transport,
+      security,
+      sni: String(query.get('sni') || ''),
+      flow: String(query.get('flow') || '')
+    },
+    endpoint,
+    proof: registryProof
+  };
+}
+
+async function registerAdditionalNodes({ quiet = false } = {}) {
+  if (!registryEnabled || !registryForcePublicProof || !registryDirectEndpoint || !registryProof) {
+    registryAdditionalRegistered = false;
+    return false;
+  }
+  const realityUri = subscriptionUris().find(uri => {
+    try {
+      const parsed = new URL(uri);
+      return parsed.searchParams.get('security') === 'reality' &&
+        parsed.searchParams.get('type') === 'tcp';
+    } catch {
+      return false;
+    }
+  });
+  if (!realityUri) {
+    registryAdditionalRegistered = false;
+    return false;
+  }
+  const prefix = identity.nodeId.replace(/-native$/i, '');
+  const nodeId = prefix + '-reality';
+  try {
+    await verifyRegistryEndpoint();
+    const payload = publicRegistryPayloadForUri(realityUri, nodeId, registryDirectEndpoint);
+    const responseText = await postJson(registryBase + '/api/v1/register-public', payload);
+    const response = JSON.parse(responseText || '{}');
+    if (
+      response?.ok !== true ||
+      response?.node_id !== nodeId ||
+      response?.subscription_eligible !== true
+    ) {
+      throw new Error('registry did not confirm REALITY subscription registration');
+    }
+    const firstReady = !registryAdditionalRegistered;
+    registryAdditionalRegistered = true;
+    if (!quiet || firstReady) {
+      console.log('REGISTRY_READY node_id=' + nodeId + ' provider=host-ship mode=public-proof route=reality action=' + String(response.action || 'confirmed'));
+    }
+    return true;
+  } catch (error) {
+    registryAdditionalRegistered = false;
+    const reason = String(error?.message || error).replace(/\s+/g, ' ').slice(0, 220);
+    rateLimitedLog(
+      'registry-additional-failure',
+      'REGISTRY_ADDITIONAL_DEFERRED node_id=' + nodeId + ' route=reality reason=' + reason,
+      5 * 60 * 1000
+    );
+    return false;
+  }
+}
+
 async function verifyRegistryEndpoint() {
   if (!registryEndpoint) return;
   const ctl = new AbortController();
@@ -536,6 +625,7 @@ async function heartbeat() {
   if (registryForcePublicProof) {
     registryToken = '';
     await registerNode({ quiet: true });
+    await registerAdditionalNodes({ quiet: true });
     return;
   }
   registryToken = readRegistryToken();
@@ -847,6 +937,7 @@ function requestHandler(req, res) {
       registry_configured: registryEnabled && !!registryNodeUri,
       registry_enabled: registryEnabled && !!registryNodeUri,
       registry_registered: registryRegistered,
+      registry_additional_registered: registryAdditionalRegistered,
       registry_last_error: registryLastError || null,
       registry_uri_security: registrySecurity || null,
       registry_auth_mode: registryForcePublicProof ? 'public-proof' : (readRegistryToken() ? 'bearer-token' : 'public-proof'),
@@ -1157,6 +1248,7 @@ async function onListen() {
   }
 
   await registerNode();
+  await registerAdditionalNodes();
   scheduleRegistryRefresh();
 }
 
